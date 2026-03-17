@@ -389,6 +389,182 @@ async function run() {
   saveSettings(settings);
   console.log(chalk.green(`\nModel ${chalk.bold(selectedModel)} saved to settings.`));
 
+  // --- VISION MODEL STEP (OPTIONAL) ---
+  const { configureVision } = await inquirer.prompt([
+    {
+      type: 'confirm',
+      name: 'configureVision',
+      message: 'Do you want to configure a separate vision model for image analysis (e.g. for Telegram photos)?',
+      default: !!settings.visionModel,
+    }
+  ]);
+
+  if (configureVision) {
+    const { visionProvider } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'visionProvider',
+        message: 'Which provider for the vision model?',
+        choices: [
+          { name: 'OpenRouter (access many models via one key)', value: 'openrouter' },
+          { name: 'Z.AI Direct (GLM models)', value: 'z-ai' },
+        ],
+        default: settings.visionProvider || provider,
+      }
+    ]);
+
+    // Ensure the key for the vision provider is available
+    const visionKeyVar = visionProvider === 'z-ai' ? 'ZAI_API_KEY' : 'OPENROUTER_API_KEY';
+    let visionApiKey = loadEnvVar(visionKeyVar);
+    if (visionApiKey) {
+      const { keepVisionKey } = await inquirer.prompt([
+        {
+          type: 'confirm',
+          name: 'keepVisionKey',
+          message: `A ${visionKeyVar} is already configured. Use it for the vision model?`,
+          default: true,
+        }
+      ]);
+      if (!keepVisionKey) visionApiKey = null;
+    }
+    if (!visionApiKey) {
+      console.log(chalk.yellow(`No ${visionKeyVar} found — needed for the vision model.`));
+      const { newVisionKey } = await inquirer.prompt([
+        {
+          type: 'password',
+          name: 'newVisionKey',
+          message: `Enter your ${visionProvider === 'z-ai' ? 'Z.AI' : 'OpenRouter'} API key:`,
+          validate: (input) => input.length >= 10 || 'API key must be at least 10 characters long.',
+        }
+      ]);
+      visionApiKey = newVisionKey;
+      saveEnvVar(visionKeyVar, visionApiKey);
+      console.log(chalk.green(`${visionKeyVar} saved.`));
+    }
+
+    // Model selection for vision provider
+    let visionModel = settings.visionProvider === visionProvider ? settings.visionModel : null;
+
+    if (visionModel) {
+      const { keepVisionModel } = await inquirer.prompt([
+        {
+          type: 'list',
+          name: 'keepVisionModel',
+          message: `Current vision model is ${chalk.yellow(visionModel)}. Keep it or change it?`,
+          choices: [
+            { name: 'Keep current vision model', value: true },
+            { name: 'Change vision model', value: false },
+          ],
+        }
+      ]);
+      if (!keepVisionModel) visionModel = null;
+    }
+
+    if (!visionModel) {
+      if (visionProvider === 'z-ai') {
+        const models = await fetchZaiModels(visionApiKey);
+        const choices = models.length > 0
+          ? models.map(m => ({ name: m.id, value: m.id }))
+          : [];
+        choices.push({ name: 'Enter model ID manually', value: '__manual__' });
+
+        const { browsedVisionModel } = await inquirer.prompt([
+          {
+            type: 'list',
+            name: 'browsedVisionModel',
+            message: 'Select a Z.AI vision model:',
+            choices,
+            pageSize: 20,
+          }
+        ]);
+        if (browsedVisionModel === '__manual__') {
+          const { manualVisionModel } = await inquirer.prompt([
+            {
+              type: 'input',
+              name: 'manualVisionModel',
+              message: 'Enter Z.AI model ID (e.g., glm-4v):',
+              validate: (input) => input.trim().length > 0 || 'Model ID cannot be empty.',
+            }
+          ]);
+          visionModel = manualVisionModel.trim();
+        } else {
+          visionModel = browsedVisionModel;
+        }
+      } else {
+        // OpenRouter
+        const { visionModelSelectionMethod } = await inquirer.prompt([
+          {
+            type: 'list',
+            name: 'visionModelSelectionMethod',
+            message: 'How would you like to select the vision model?',
+            choices: [
+              { name: 'Browse OpenRouter models', value: 'browse' },
+              { name: 'Enter model ID manually', value: 'manual' },
+            ],
+          }
+        ]);
+
+        if (visionModelSelectionMethod === 'manual') {
+          const { manualVisionModel } = await inquirer.prompt([
+            {
+              type: 'input',
+              name: 'manualVisionModel',
+              message: 'Enter OpenRouter model ID (e.g., openai/gpt-4o):',
+              validate: (input) => input.trim().length > 0 || 'Model ID cannot be empty.',
+            }
+          ]);
+          visionModel = manualVisionModel.trim();
+        } else {
+          const models = await fetchOpenRouterModels(visionApiKey);
+          if (models.length === 0) {
+            console.log(chalk.yellow('Falling back to manual entry due to fetch failure.'));
+            const { manualVisionModel } = await inquirer.prompt([
+              {
+                type: 'input',
+                name: 'manualVisionModel',
+                message: 'Enter OpenRouter model ID:',
+                validate: (input) => input.trim().length > 0 || 'Model ID cannot be empty.',
+              }
+            ]);
+            visionModel = manualVisionModel.trim();
+          } else {
+            models.sort((a, b) => {
+              const isFreeA = a.pricing && parseFloat(a.pricing.prompt) === 0 && parseFloat(a.pricing.completion) === 0;
+              const isFreeB = b.pricing && parseFloat(b.pricing.prompt) === 0 && parseFloat(b.pricing.completion) === 0;
+              if (isFreeA && !isFreeB) return -1;
+              if (!isFreeA && isFreeB) return 1;
+              return a.id.localeCompare(b.id);
+            });
+            const choices = models.map(m => {
+              const isFree = m.pricing && parseFloat(m.pricing.prompt) === 0 && parseFloat(m.pricing.completion) === 0;
+              return { name: `${m.id} ${isFree ? chalk.green('(Free)') : ''}`, value: m.id };
+            });
+            const { browsedVisionModel } = await inquirer.prompt([
+              {
+                type: 'list',
+                name: 'browsedVisionModel',
+                message: 'Select a vision model:',
+                choices,
+                pageSize: 20,
+              }
+            ]);
+            visionModel = browsedVisionModel;
+          }
+        }
+      }
+    }
+
+    settings.visionProvider = visionProvider;
+    settings.visionModel = visionModel;
+    saveSettings(settings);
+    console.log(chalk.green(`Vision model ${chalk.bold(visionModel)} saved.`));
+  } else {
+    // Clear vision config if user opts out
+    delete settings.visionProvider;
+    delete settings.visionModel;
+    saveSettings(settings);
+  }
+
   // --- TELEGRAM CHANNEL STEP (OPTIONAL) ---
   const { configureTelegram } = await inquirer.prompt([
     {

@@ -54,6 +54,16 @@ export function loadConfig() {
     if (!apiKey) throw new Error('OPENROUTER_API_KEY not found. Run `jarvis setup` first.');
   }
 
+  // Vision model (optional) — separate provider/model for one-shot image analysis
+  const visionProvider = settings.visionProvider || null;
+  const visionModel = settings.visionModel || null;
+  let visionApiKey = null;
+  if (visionProvider === 'z-ai') {
+    visionApiKey = process.env.ZAI_API_KEY || null;
+  } else if (visionProvider === 'openrouter') {
+    visionApiKey = process.env.OPENROUTER_API_KEY || null;
+  }
+
   return {
     provider,
     apiKey,
@@ -67,6 +77,9 @@ export function loadConfig() {
       token: process.env.TELEGRAM_BOT_TOKEN || null,
       allowedUserIds: settings.channels?.telegram?.allowedUserIds || [],
     },
+    visionProvider,
+    visionModel,
+    visionApiKey,
   };
 }
 

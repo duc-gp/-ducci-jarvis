@@ -6,6 +6,7 @@ import { handleChat } from '../../server/agent.js';
 import { loadSession } from '../../server/sessions.js';
 import { PATHS } from '../../server/config.js';
 import { load, save } from './sessions.js';
+import { describeImage } from '../../server/vision.js';
 
 function getTelegramChatLogPath(chatId, sessionId) {
   const prefix = sessionId ? String(sessionId).slice(0, 8) : 'unknown';
@@ -123,11 +124,39 @@ export async function startTelegramChannel(config) {
       const combinedText = batch.length === 1
         ? batch[0].text
         : batch.map(m => m.text).join('\n\n');
-      const allAttachments = batch.flatMap(m => m.attachments);
+      const rawAttachments = batch.flatMap(m => m.attachments);
+
+      // If a vision model is configured and the batch contains images, run a one-shot
+      // image analysis first and inject the result as text into the main agent turn.
+      let userText = combinedText;
+      let allAttachments = rawAttachments;
+      if (config.visionModel && config.visionApiKey && rawAttachments.length > 0) {
+        try {
+          const results = await Promise.allSettled(
+            rawAttachments.map(a => describeImage(a, combinedText, config))
+          );
+          const successfulDescs = results
+            .filter(r => r.status === 'fulfilled')
+            .map(r => `[Image analysis: ${r.value}]`);
+          const failedCount = results.filter(r => r.status === 'rejected').length;
+          if (failedCount > 0) {
+            console.error(`[telegram] vision error for ${failedCount}/${results.length} image(s), those will be sent directly to main agent`);
+          }
+          if (successfulDescs.length > 0) {
+            const descBlock = successfulDescs.join('\n\n');
+            userText = combinedText ? `${descBlock}\n\n${combinedText}` : descBlock;
+          }
+          // Only clear attachments for images that were successfully described
+          allAttachments = rawAttachments.filter((_, i) => results[i].status === 'rejected');
+        } catch (e) {
+          console.error(`[telegram] vision error, falling back to direct image: ${e.message}`);
+          // allAttachments and userText stay unchanged — main agent gets the raw image
+        }
+      }
 
       let result;
       try {
-        result = await handleChat(config, sessionId, combinedText, allAttachments);
+        result = await handleChat(config, sessionId, userText, allAttachments);
       } catch (e) {
         console.error(`[telegram] agent error chat_id=${chatId}: ${e.message}`);
         const errText = e.message
