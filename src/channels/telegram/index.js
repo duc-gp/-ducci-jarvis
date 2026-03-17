@@ -58,6 +58,11 @@ export async function startTelegramChannel(config) {
   const bot = new Bot(token);
   const sessions = load();
 
+  // Tracks chats with an active agent run and buffers messages arriving during that run.
+  // When the run finishes all buffered messages are merged into one combined run.
+  const isRunning = new Set();
+  const pendingMessages = new Map(); // chatId -> [{text, attachments, ts}]
+
   await bot.api.setMyCommands([
     { command: 'new', description: 'Start a fresh session' },
     { command: 'usage', description: 'Show token usage for the current session' },
@@ -97,6 +102,7 @@ export async function startTelegramChannel(config) {
     if (!allowedUserIds.includes(userId)) return;
 
     const chatId = ctx.chat.id;
+    pendingMessages.delete(chatId);
     if (sessions[chatId]) {
       await appendTelegramChatLog(chatId, sessions[chatId], 'SYSTEM', '--- /new: session reset ---');
       delete sessions[chatId];
@@ -107,22 +113,74 @@ export async function startTelegramChannel(config) {
     await ctx.reply('New session started.');
   });
 
+  // Runs one or more batches until the pending queue is drained.
+  // Each iteration takes all currently pending messages, merges them into a
+  // single user turn, calls handleChat once, and sends one response.
+  async function processQueue(api, chatId, firstBatch) {
+    let batch = firstBatch;
+    while (batch.length > 0) {
+      const sessionId = sessions[chatId] || null;
+      const combinedText = batch.length === 1
+        ? batch[0].text
+        : batch.map(m => m.text).join('\n\n');
+      const allAttachments = batch.flatMap(m => m.attachments);
+
+      let result;
+      try {
+        result = await handleChat(config, sessionId, combinedText, allAttachments);
+      } catch (e) {
+        console.error(`[telegram] agent error chat_id=${chatId}: ${e.message}`);
+        const errText = e.message
+          ? `Sorry, something went wrong: ${e.message}`
+          : 'Sorry, something went wrong. Please try again.';
+        await api.sendMessage(chatId, errText).catch(() => {});
+        batch = pendingMessages.get(chatId) || [];
+        pendingMessages.delete(chatId);
+        continue;
+      }
+
+      if (!sessions[chatId]) {
+        sessions[chatId] = result.sessionId;
+        save(sessions);
+        console.log(`[telegram] session created sessionId=${result.sessionId.slice(0, 8)}`);
+      }
+
+      // Log each original message individually with its own timestamp
+      for (const m of batch) {
+        await appendTelegramChatLog(chatId, result.sessionId, 'USER', m.text || '[photo]', m.ts);
+      }
+
+      try {
+        const rawResponse = typeof result.response === 'string'
+          ? result.response
+          : result.response != null ? JSON.stringify(result.response, null, 2) : '';
+        const text = rawResponse.trim()
+          || 'The agent encountered an error and could not produce a response. Please try again.';
+        await appendTelegramChatLog(chatId, result.sessionId, 'JARVIS', text);
+        await sendMessage(api, chatId, text, result.sessionId);
+        console.log(`[telegram] response sent chat_id=${chatId} length=${text.length}`);
+      } catch (e) {
+        console.error(`[telegram] delivery error chat_id=${chatId}: ${e.message}`);
+        await api.sendMessage(chatId, 'Sorry, something went wrong sending the response. Please try again.').catch(() => {});
+      }
+
+      // Drain any messages that arrived while we were running
+      batch = pendingMessages.get(chatId) || [];
+      pendingMessages.delete(chatId);
+    }
+  }
+
   bot.on('message:photo', async (ctx) => {
     const userId = ctx.from?.id;
     if (!allowedUserIds.includes(userId)) return;
 
     const chatId = ctx.chat.id;
-    const sessionId = sessions[chatId] || null;
+    const ts = new Date().toISOString();
 
     console.log(`[telegram] incoming photo chat_id=${chatId}`);
 
-    await ctx.api.sendChatAction(chatId, 'typing');
-    const typingInterval = setInterval(() => {
-      ctx.api.sendChatAction(chatId, 'typing').catch(() => {});
-    }, 4000);
-
-    const userTs = new Date().toISOString();
-    let result;
+    // Download the photo first regardless of whether we buffer or run immediately
+    let attachment;
     try {
       const photo = ctx.message.photo.filter(p => p.width <= 800).at(-1)
         ?? ctx.message.photo[0];
@@ -131,42 +189,33 @@ export async function startTelegramChannel(config) {
       const imgResponse = await fetch(fileUrl);
       const buffer = await imgResponse.arrayBuffer();
       const base64 = Buffer.from(buffer).toString('base64');
-      const dataUrl = `data:image/jpeg;base64,${base64}`;
-      const caption = ctx.message.caption || '';
-      result = await handleChat(config, sessionId, caption, [{ url: dataUrl }]);
+      attachment = { url: `data:image/jpeg;base64,${base64}` };
     } catch (e) {
-      console.error(`[telegram] agent error chat_id=${chatId}: ${e.message}`);
-      const errText = e.message
-        ? `Sorry, something went wrong: ${e.message}`
-        : 'Sorry, something went wrong. Please try again.';
-      await ctx.reply(errText).catch(() => {});
-      clearInterval(typingInterval);
+      console.error(`[telegram] photo download error chat_id=${chatId}: ${e.message}`);
+      await ctx.reply('Sorry, could not process the photo.').catch(() => {});
       return;
     }
 
-    if (!sessions[chatId]) {
-      sessions[chatId] = result.sessionId;
-      save(sessions);
-      console.log(`[telegram] session created sessionId=${result.sessionId.slice(0, 8)}`);
+    const entry = { text: ctx.message.caption || '', attachments: [attachment], ts };
+
+    if (isRunning.has(chatId)) {
+      if (!pendingMessages.has(chatId)) pendingMessages.set(chatId, []);
+      pendingMessages.get(chatId).push(entry);
+      console.log(`[telegram] buffered photo chat_id=${chatId} pending=${pendingMessages.get(chatId).length}`);
+      return;
     }
 
-    const captionText = ctx.message.caption || '[photo]';
-    await appendTelegramChatLog(chatId, result.sessionId, 'USER', `[photo] ${captionText}`, userTs);
+    isRunning.add(chatId);
+    await ctx.api.sendChatAction(chatId, 'typing');
+    const typingInterval = setInterval(() => {
+      ctx.api.sendChatAction(chatId, 'typing').catch(() => {});
+    }, 4000);
 
     try {
-      const rawResponse = typeof result.response === 'string'
-        ? result.response
-        : result.response != null ? JSON.stringify(result.response, null, 2) : '';
-      const text = rawResponse.trim()
-        || 'The agent encountered an error and could not produce a response. Please try again.';
-      await appendTelegramChatLog(chatId, result.sessionId, 'JARVIS', text);
-      await sendMessage(ctx.api, chatId, text, result.sessionId);
-      console.log(`[telegram] response sent chat_id=${chatId} length=${text.length}`);
-    } catch (e) {
-      console.error(`[telegram] delivery error chat_id=${chatId}: ${e.message}`);
-      await ctx.api.sendMessage(chatId, 'Sorry, something went wrong sending the response. Please try again.').catch(() => {});
+      await processQueue(ctx.api, chatId, [entry]);
     } finally {
       clearInterval(typingInterval);
+      isRunning.delete(chatId);
     }
   });
 
@@ -177,53 +226,28 @@ export async function startTelegramChannel(config) {
     if (!allowedUserIds.includes(userId)) return;
 
     const chatId = ctx.chat.id;
-    const sessionId = sessions[chatId] || null;
+    const ts = new Date().toISOString();
+    const entry = { text: ctx.message.text, attachments: [], ts };
 
+    if (isRunning.has(chatId)) {
+      if (!pendingMessages.has(chatId)) pendingMessages.set(chatId, []);
+      pendingMessages.get(chatId).push(entry);
+      console.log(`[telegram] buffered message chat_id=${chatId} pending=${pendingMessages.get(chatId).length}`);
+      return;
+    }
+
+    isRunning.add(chatId);
     console.log(`[telegram] incoming chat_id=${chatId}`);
-
     await ctx.api.sendChatAction(chatId, 'typing');
     const typingInterval = setInterval(() => {
       ctx.api.sendChatAction(chatId, 'typing').catch(() => {});
     }, 4000);
 
-    const userTs = new Date().toISOString();
-    let result;
     try {
-      result = await handleChat(config, sessionId, ctx.message.text);
-    } catch (e) {
-      console.error(`[telegram] agent error chat_id=${chatId}: ${e.message}`);
-      const errText = e.message
-        ? `Sorry, something went wrong: ${e.message}`
-        : 'Sorry, something went wrong. Please try again.';
-      await ctx.reply(errText).catch(() => {});
-      clearInterval(typingInterval);
-      return;
-    }
-
-    // Persist new session mapping on first message
-    if (!sessions[chatId]) {
-      sessions[chatId] = result.sessionId;
-      save(sessions);
-      console.log(`[telegram] session created sessionId=${result.sessionId.slice(0, 8)}`);
-    }
-
-    await appendTelegramChatLog(chatId, result.sessionId, 'USER', ctx.message.text, userTs);
-
-    try {
-      // Guard against empty or non-string response (e.g. model returns array instead of string)
-      const rawResponse = typeof result.response === 'string'
-        ? result.response
-        : result.response != null ? JSON.stringify(result.response, null, 2) : '';
-      const text = rawResponse.trim()
-        || 'The agent encountered an error and could not produce a response. Please try again.';
-      await appendTelegramChatLog(chatId, result.sessionId, 'JARVIS', text);
-      await sendMessage(ctx.api, chatId, text, result.sessionId);
-      console.log(`[telegram] response sent chat_id=${chatId} length=${text.length}`);
-    } catch (e) {
-      console.error(`[telegram] delivery error chat_id=${chatId}: ${e.message}`);
-      await ctx.api.sendMessage(chatId, 'Sorry, something went wrong sending the response. Please try again.').catch(() => {});
+      await processQueue(ctx.api, chatId, [entry]);
     } finally {
       clearInterval(typingInterval);
+      isRunning.delete(chatId);
     }
   });
 
