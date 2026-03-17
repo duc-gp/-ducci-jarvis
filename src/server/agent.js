@@ -15,6 +15,41 @@ const LOOP_DETECTION_THRESHOLD = 3;
 function stripCodeFence(text) {
   return text.replace(/^```(?:json)?\s*\n([\s\S]*?)\n?```\s*$/, '$1').trim();
 }
+
+// Sanitize raw model output before JSON.parse:
+// 1. Strip code fences
+// 2. Escape literal control characters (e.g. real newlines in <pre> blocks) inside
+//    JSON string values — models sometimes forget to escape \n as \\n
+// 3. Remove trailing commas before } and ] (JS-valid but JSON-invalid)
+function sanitizeJson(text) {
+  let s = stripCodeFence(text);
+
+  // State machine: walk the string and fix unescaped control chars inside strings
+  let result = '';
+  let inString = false;
+  let escaped = false;
+  const controlEscapes = { '\n': '\\n', '\r': '\\r', '\t': '\\t' };
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (escaped) {
+      result += ch;
+      escaped = false;
+    } else if (ch === '\\' && inString) {
+      result += ch;
+      escaped = true;
+    } else if (ch === '"') {
+      result += ch;
+      inString = !inString;
+    } else if (inString && ch.charCodeAt(0) < 0x20) {
+      result += controlEscapes[ch] ?? `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`;
+    } else {
+      result += ch;
+    }
+  }
+
+  // Remove trailing commas before } and ]
+  return result.replace(/,(\s*[}\]])/g, '$1');
+}
 const CONSECUTIVE_FAILURE_THRESHOLD = 3;
 const MAX_TOOL_RESULT = 4000;
 
@@ -402,20 +437,20 @@ export async function runAgentLoop(client, config, session, prepareMessages, usa
         if (nudgeContent.trim()) {
           content = nudgeContent;
         }
-        parsed = JSON.parse(stripCodeFence(nudgeContent));
+        parsed = JSON.parse(sanitizeJson(nudgeContent));
       } catch {
         // Fall through to !parsed handler; content may now carry the nudge text
       }
     } else {
       try {
-        parsed = JSON.parse(stripCodeFence(content));
+        parsed = JSON.parse(sanitizeJson(content));
       } catch {
         // Step 1: retry with fallback model
         try {
           const fallbackResult = await callModel(client, config.fallbackModel, preparedMessages, toolDefs);
           accumulateUsage(usageAccum, fallbackResult);
           const fallbackContent = fallbackResult.choices[0]?.message?.content || '';
-          parsed = JSON.parse(stripCodeFence(fallbackContent));
+          parsed = JSON.parse(sanitizeJson(fallbackContent));
           content = fallbackContent;
         } catch {
           // Step 2: nudge retry via both models
@@ -424,7 +459,7 @@ export async function runAgentLoop(client, config, session, prepareMessages, usa
             const nudgeResult = await callModelWithFallback(client, config, nudgeMessages, toolDefs);
             accumulateUsage(usageAccum, nudgeResult);
             const nudgeContent = nudgeResult.choices[0]?.message?.content || '';
-            parsed = JSON.parse(stripCodeFence(nudgeContent));
+            parsed = JSON.parse(sanitizeJson(nudgeContent));
             content = nudgeContent;
           } catch {
             // Give up
@@ -495,14 +530,14 @@ export async function runAgentLoop(client, config, session, prepareMessages, usa
 
     // Try JSON parse; if it fails, nudge retry (Layer 2)
     try {
-      parsedWrapUp = JSON.parse(stripCodeFence(wrapUpContent));
+      parsedWrapUp = JSON.parse(sanitizeJson(wrapUpContent));
     } catch {
       try {
         const nudgeMessages = [...wrapUpMessages, { role: 'user', content: FORMAT_NUDGE }];
         const nudgeResult = await callModelWithFallback(client, config, nudgeMessages, []);
         accumulateUsage(usageAccum, nudgeResult);
         const nudgeContent = nudgeResult.choices[0]?.message?.content || '';
-        parsedWrapUp = JSON.parse(stripCodeFence(nudgeContent));
+        parsedWrapUp = JSON.parse(sanitizeJson(nudgeContent));
         wrapUpContent = nudgeContent;
       } catch {
         // Layer 3: use raw text as best-effort response below
