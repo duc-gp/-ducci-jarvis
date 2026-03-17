@@ -1,6 +1,6 @@
 # Jarvis
 
-A self-hosted AI agent that runs as a background server. Chat with it via a web UI or Telegram, give it tools to run shell commands and manage files, and schedule recurring tasks — all powered by any model on OpenRouter or the Anthropic API.
+A self-hosted AI agent that runs as a background server. Chat with it via a web UI or Telegram, give it tools to run shell commands and manage files, and schedule recurring tasks — all powered by any model on OpenRouter, z.ai, or the Anthropic API.
 
 ## Features
 
@@ -10,7 +10,7 @@ A self-hosted AI agent that runs as a background server. Chat with it via a web 
 - **Cron scheduler** — schedule recurring or one-time tasks in plain English; agent runs them autonomously and can notify you via Telegram
 - **Skills** — Markdown-defined workflows the agent discovers and follows for specific task types
 - **Custom tools** — define tools in JSON (name, description, JS code); the agent picks them up without a restart
-- **Multi-provider** — OpenRouter (any model) or Anthropic directly (with prompt caching)
+- **Multi-provider** — OpenRouter, z.ai, or Anthropic directly (with prompt caching)
 - **Persistent sessions** — full conversation history per session, sliding context window
 
 ## Quick start
