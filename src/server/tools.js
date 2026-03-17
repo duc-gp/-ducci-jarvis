@@ -656,6 +656,71 @@ const SEED_TOOLS = {
       return { status: 'ok', name: args.name, content };
     `,
   },
+  analyze_image: {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'analyze_image',
+        description: 'Fetch an image from a URL and analyze it using the configured vision model. Returns a detailed description of the image. Use this whenever a user shares an image URL and asks about its content.',
+        parameters: {
+          type: 'object',
+          properties: {
+            url: {
+              type: 'string',
+              description: 'The URL of the image to analyze (http or https).',
+            },
+            prompt: {
+              type: 'string',
+              description: 'Optional question or instruction for the vision model, e.g. "What text is visible?" or "Describe the chart". Defaults to a general description.',
+            },
+          },
+          required: ['url'],
+        },
+      },
+    },
+    code: `
+      const settingsPath = path.join(process.env.HOME, '.jarvis/data/config/settings.json');
+      const settings = JSON.parse(await fs.promises.readFile(settingsPath, 'utf8').catch(() => '{}'));
+      const visionModel = settings.visionModel;
+      const visionProvider = settings.visionProvider;
+      if (!visionModel || !visionProvider) {
+        return { status: 'error', message: 'No vision model configured. Set visionModel and visionProvider in settings.' };
+      }
+      let apiKey, baseURL;
+      if (visionProvider === 'z-ai') {
+        apiKey = process.env.ZAI_API_KEY;
+        baseURL = 'https://api.z.ai/api/coding/paas/v4/';
+      } else {
+        apiKey = process.env.OPENROUTER_API_KEY;
+        baseURL = 'https://openrouter.ai/api/v1';
+      }
+      if (!apiKey) return { status: 'error', message: 'No API key found for vision provider: ' + visionProvider };
+      const imgResponse = await fetch(args.url);
+      if (!imgResponse.ok) return { status: 'error', message: 'Failed to fetch image: HTTP ' + imgResponse.status };
+      const buffer = await imgResponse.arrayBuffer();
+      const base64 = Buffer.from(buffer).toString('base64');
+      const contentType = imgResponse.headers.get('content-type') || 'image/jpeg';
+      const dataUrl = 'data:' + contentType + ';base64,' + base64;
+      const textPrompt = args.prompt?.trim()
+        ? 'The user shared this image with the following question/context: "' + args.prompt.trim() + '"\\n\\nPlease describe what you see, paying special attention to anything relevant to their message.'
+        : 'Please describe this image in detail. Include all visible text, objects, colors, layout, and any other relevant details.';
+      const apiResponse = await fetch(baseURL + (baseURL.endsWith('/') ? '' : '/') + 'chat/completions', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: visionModel,
+          messages: [{ role: 'user', content: [
+            { type: 'image_url', image_url: { url: dataUrl } },
+            { type: 'text', text: textPrompt },
+          ]}],
+        }),
+      });
+      const result = await apiResponse.json();
+      if (!apiResponse.ok) return { status: 'error', message: result.error?.message || 'Vision API error' };
+      const description = result.choices?.[0]?.message?.content?.trim() || '(no description returned)';
+      return { status: 'ok', description };
+    `,
+  },
 };
 
 export function seedTools() {

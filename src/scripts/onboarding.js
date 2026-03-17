@@ -390,16 +390,42 @@ async function run() {
   console.log(chalk.green(`\nModel ${chalk.bold(selectedModel)} saved to settings.`));
 
   // --- VISION MODEL STEP (OPTIONAL) ---
-  const { configureVision } = await inquirer.prompt([
-    {
-      type: 'confirm',
-      name: 'configureVision',
-      message: 'Do you want to configure a separate vision model for image analysis (e.g. for Telegram photos)?',
-      default: !!settings.visionModel,
+  let skipVision = false;
+  if (settings.visionModel) {
+    const { visionAction } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'visionAction',
+        message: `Vision model is configured (${chalk.yellow(settings.visionModel)}). What do you want to do?`,
+        choices: [
+          { name: 'Keep current vision model', value: 'keep' },
+          { name: 'Change vision model', value: 'change' },
+          { name: 'Disable vision', value: 'disable' },
+        ],
+      }
+    ]);
+    if (visionAction === 'keep') {
+      skipVision = true;
+    } else if (visionAction === 'disable') {
+      delete settings.visionProvider;
+      delete settings.visionModel;
+      saveSettings(settings);
+      console.log(chalk.yellow('Vision model disabled.'));
+      skipVision = true;
     }
-  ]);
+  } else {
+    const { configureVision } = await inquirer.prompt([
+      {
+        type: 'confirm',
+        name: 'configureVision',
+        message: 'Do you want to configure a separate vision model for image analysis (e.g. for Telegram photos)?',
+        default: false,
+      }
+    ]);
+    if (!configureVision) skipVision = true;
+  }
 
-  if (configureVision) {
+  if (!skipVision) {
     const { visionProvider } = await inquirer.prompt([
       {
         type: 'list',
@@ -558,11 +584,6 @@ async function run() {
     settings.visionModel = visionModel;
     saveSettings(settings);
     console.log(chalk.green(`Vision model ${chalk.bold(visionModel)} saved.`));
-  } else {
-    // Clear vision config if user opts out
-    delete settings.visionProvider;
-    delete settings.visionModel;
-    saveSettings(settings);
   }
 
   // --- TELEGRAM CHANNEL STEP (OPTIONAL) ---
@@ -637,44 +658,6 @@ async function run() {
       settings.channels.telegram.allowedUserIds = ids;
       saveSettings(settings);
       console.log(chalk.green(`Allowed user IDs saved: ${ids.join(', ')}`));
-    }
-  }
-
-  // --- PERPLEXITY STEP (OPTIONAL) ---
-  const existingPerplexityKey = loadEnvVar('PERPLEXITY_API_KEY');
-  const { configurePerplexity } = await inquirer.prompt([
-    {
-      type: 'confirm',
-      name: 'configurePerplexity',
-      message: 'Do you want to configure Perplexity web search?',
-      default: !!existingPerplexityKey
-    }
-  ]);
-
-  if (configurePerplexity) {
-    let keepPerplexityKey = false;
-    if (existingPerplexityKey) {
-      const { keep } = await inquirer.prompt([
-        {
-          type: 'confirm',
-          name: 'keep',
-          message: 'A PERPLEXITY_API_KEY is already configured. Do you want to keep it?',
-          default: true
-        }
-      ]);
-      keepPerplexityKey = keep;
-    }
-    if (!keepPerplexityKey) {
-      const { perplexityKey } = await inquirer.prompt([
-        {
-          type: 'password',
-          name: 'perplexityKey',
-          message: 'Enter your Perplexity API key (from perplexity.ai/settings/api):',
-          validate: (input) => input.trim().length > 0 || 'API key cannot be empty.'
-        }
-      ]);
-      saveEnvVar('PERPLEXITY_API_KEY', perplexityKey.trim());
-      console.log(chalk.green('Perplexity API key saved.'));
     }
   }
 
