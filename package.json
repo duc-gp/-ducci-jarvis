@@ -1,0 +1,54 @@
+{
+  "name": "@ducci/jarvis",
+  "version": "1.0.63",
+  "description": "A fully automated agent system that lives on a server.",
+  "main": "./src/index.js",
+  "type": "module",
+  "bin": {
+    "jarvis": "./src/index.js",
+    "jarvis-setup": "./src/scripts/onboarding.js"
+  },
+  "files": [
+    "src",
+    "docs",
+    "ui/dist"
+  ],
+  "scripts": {
+    "start": "node ./src/index.js start",
+    "stop": "node ./src/index.js stop",
+    "status": "node ./src/index.js status",
+    "setup": "node ./src/scripts/onboarding.js",
+    "dev": "nodemon ./src/server/app.js",
+    "prepare": "cd ui && npm install && npm run build",
+    "release": "node scripts/publish.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "agent",
+    "ai",
+    "openrouter",
+    "cli",
+    "server"
+  ],
+  "author": "ducci",
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@grammyjs/runner": "^2.0.3",
+    "chalk": "^5.6.2",
+    "commander": "^14.0.3",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "grammy": "^1.40.1",
+    "inquirer": "^12.11.1",
+    "node-cron": "^4.2.1",
+    "openai": "^6.22.0",
+    "pm2": "^6.0.14"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}

@@ -1,0 +1,7 @@
+node_modules/
+ui/node_modules/
+.env
+.claude/
+debugging/
+memory/
+CLAUDE.md
