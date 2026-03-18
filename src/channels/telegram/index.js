@@ -20,10 +20,28 @@ async function appendTelegramChatLog(chatId, sessionId, direction, text, ts = nu
   await fs.promises.appendFile(logFile, line, 'utf8').catch(() => {});
 }
 
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function markdownToHtml(text) {
+  // 1. Block fences: ```[lang]\ncontent\n``` → <pre>content</pre>
+  text = text.replace(/```[\w]*\n([\s\S]*?)\n?```/g, (_, content) => {
+    return `<pre>${escapeHtml(content)}</pre>`;
+  });
+  // 2. Inline code: `content` → <code>content</code> (no newlines inside)
+  text = text.replace(/`([^`\n]+)`/g, (_, content) => {
+    return `<code>${escapeHtml(content)}</code>`;
+  });
+  return text;
+}
+
 async function sendMessage(api, chatId, text, sessionId) {
   const MAX_TG = 4096;
   // Telegram HTML mode does not support <br> — replace with newlines before sending
   text = text.replace(/<br\s*\/?>/gi, '\n');
+  // Convert leftover Markdown code fences to HTML (model sometimes mixes both formats)
+  text = markdownToHtml(text);
   const chunks = [];
   for (let i = 0; i < text.length; i += MAX_TG) {
     chunks.push(text.slice(i, i + MAX_TG));
