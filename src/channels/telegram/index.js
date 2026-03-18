@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { Bot } from 'grammy';
 import { run } from '@grammyjs/runner';
-import { handleChat } from '../../server/agent.js';
+import { handleChat, requestAbort } from '../../server/agent.js';
 import { loadSession } from '../../server/sessions.js';
 import { PATHS } from '../../server/config.js';
 import { load, save } from './sessions.js';
@@ -100,6 +100,7 @@ export async function startTelegramChannel(config) {
   await bot.api.setMyCommands([
     { command: 'new', description: 'Start a fresh session' },
     { command: 'usage', description: 'Show token usage for the current session' },
+    { command: 'stop', description: 'Stop the current run' },
   ]);
 
   bot.command('usage', async (ctx) => {
@@ -129,6 +130,23 @@ export async function startTelegramChannel(config) {
     await ctx.reply(
       `Token usage for current session:\nIn:    ${u.prompt.toLocaleString()}\nOut:   ${u.completion.toLocaleString()}\nTotal: ${total.toLocaleString()}${cacheLines}`
     );
+  });
+
+  bot.command('stop', async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!allowedUserIds.includes(userId)) return;
+
+    const chatId = ctx.chat.id;
+    const sessionId = sessions[chatId];
+
+    if (!isRunning.has(chatId) || !sessionId) {
+      await ctx.reply('Nothing is currently running.');
+      return;
+    }
+
+    requestAbort(sessionId);
+    await appendTelegramChatLog(chatId, sessionId, 'SYSTEM', '--- /stop requested ---');
+    await ctx.reply('Stopping current run... I\'ll send a summary when done.');
   });
 
   bot.command('new', async (ctx) => {

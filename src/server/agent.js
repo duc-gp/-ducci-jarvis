@@ -53,6 +53,22 @@ function sanitizeJson(text) {
 const CONSECUTIVE_FAILURE_THRESHOLD = 3;
 const MAX_TOOL_RESULT = 4000;
 
+const ABORT_NOTE = `[System: The user has requested an immediate stop. This is your final response for this run.
+Respond with your normal JSON, but add a checkpoint field:
+
+{
+  "response": "Brief message to the user acknowledging the stop and summarising what was completed.",
+  "logSummary": "Human-readable summary of what happened before the stop.",
+  "checkpoint": {
+    "progress": "What has been fully completed — only include items confirmed by tool output.",
+    "remaining": "What still needs to be done to finish the original task — as a plain text string, never an array or object.",
+    "failedApproaches": ["Concise description of each approach that failed. Leave as empty array if nothing failed."],
+    "state": {"factKey": "factValue — concrete facts confirmed by tool output: file paths, binary locations, config values. Use {} if nothing concrete was discovered."}
+  }
+}
+
+The checkpoint will allow the task to be resumed later if needed.]`;
+
 const WRAP_UP_NOTE = `[System: You have reached the iteration limit. This is your final response for this run.
 Respond with your normal JSON, but add a checkpoint field:
 
@@ -73,6 +89,15 @@ The checkpoint field will be used to automatically resume the task in the next r
 // tail of the current request chain (a Promise that resolves when the last
 // queued request finishes).
 const sessionQueues = new Map();
+
+// Abort flags: set by requestAbort(), checked at each iteration boundary in
+// runAgentLoop. Always cleared in _runHandleChat's finally block to prevent
+// stale flags from killing subsequent runs.
+const sessionAborts = new Map();
+
+export function requestAbort(sessionId) {
+  sessionAborts.set(sessionId, true);
+}
 
 function accumulateUsage(accum, result) {
   const u = result?.usage;
@@ -234,6 +259,48 @@ export async function runAgentLoop(client, config, session, prepareMessages, usa
 
   while (iteration < config.maxIterations) {
     iteration++;
+
+    // Check for user-requested stop. Do a wrap-up call so the user gets a
+    // meaningful summary and the session can be resumed later if needed.
+    if (sessionAborts.get(config._sessionId)) {
+      sessionAborts.delete(config._sessionId);
+      const abortMessages = [
+        ...prepareMessages(session.messages),
+        { role: 'user', content: ABORT_NOTE },
+      ];
+      try {
+        const abortResult = await callModelWithFallback(client, config, abortMessages, []);
+        accumulateUsage(usageAccum, abortResult);
+        const abortContent = abortResult.choices[0]?.message?.content || '';
+        let parsedAbort = null;
+        try { parsedAbort = JSON.parse(sanitizeJson(abortContent)); } catch { /* use raw */ }
+        session.messages.push({ role: 'assistant', content: abortContent });
+        if (parsedAbort?.checkpoint) {
+          const cp = parsedAbort.checkpoint;
+          if (typeof cp.remaining !== 'string') cp.remaining = Array.isArray(cp.remaining) ? cp.remaining.map(String).join('\n') : cp.remaining != null ? JSON.stringify(cp.remaining) : '';
+          if (!Array.isArray(cp.failedApproaches)) cp.failedApproaches = [];
+          else cp.failedApproaches = cp.failedApproaches.map(i => typeof i === 'string' ? i : JSON.stringify(i));
+          if (typeof cp.state !== 'object' || cp.state === null || Array.isArray(cp.state)) cp.state = {};
+        }
+        return {
+          iteration,
+          response: parsedAbort?.response || abortContent || 'Run stopped.',
+          logSummary: parsedAbort?.logSummary || 'Run stopped by user request.',
+          status: 'aborted',
+          runToolCalls,
+          checkpoint: parsedAbort?.checkpoint || null,
+        };
+      } catch (e) {
+        return {
+          iteration,
+          response: 'Run stopped.',
+          logSummary: `Run stopped by user request. Wrap-up call failed: ${e.message}`,
+          status: 'aborted',
+          runToolCalls,
+          checkpoint: null,
+        };
+      }
+    }
 
     let modelResult;
     const iterationsLeft = config.maxIterations - iteration + 1;
@@ -774,6 +841,21 @@ async function _runHandleChat(config, sessionId, userMessage, attachments = [], 
         // makes the next one more likely (especially on free models with small context
         // windows). The synthetic note is sufficient context; tool results are preserved
         // in the JSONL log and accessible via read_session_log.
+        // On abort: save checkpoint data so the task can be resumed later,
+        // same as the checkpoint_reached path does for handoff runs.
+        if (finalStatus === 'aborted' && run.checkpoint) {
+          if (run.checkpoint.failedApproaches?.length > 0) {
+            if (!session.metadata.failedApproaches) session.metadata.failedApproaches = [];
+            session.metadata.failedApproaches.push(...run.checkpoint.failedApproaches);
+          }
+          if (run.checkpoint.state && Object.keys(run.checkpoint.state).length > 0) {
+            session.metadata.checkpointState = { ...(session.metadata.checkpointState || {}), ...run.checkpoint.state };
+          }
+          if (run.checkpoint.remaining) {
+            session.metadata.lastCheckpointRemaining = run.checkpoint.remaining.trim();
+          }
+        }
+
         if (finalStatus === 'model_error' || finalStatus === 'format_error') {
           if (finalStatus === 'model_error' && isImageUnsupportedError(run.errorDetail)) {
             finalResponse = 'This model does not support image input. Please switch to a multimodal model (e.g. claude-3.5-sonnet, gpt-4o) in settings.';
@@ -914,6 +996,10 @@ async function _runHandleChat(config, sessionId, userMessage, attachments = [], 
     });
     throw e;
   } finally {
+    // Clear any stale abort flag — prevents a flag set just as a run finished
+    // from killing the next run.
+    sessionAborts.delete(sessionId);
+
     // Accumulate token usage into session metadata so /usage can read it
     if (!session.metadata.tokenUsage) session.metadata.tokenUsage = { prompt: 0, completion: 0, cacheRead: 0, cacheCreation: 0 };
     session.metadata.tokenUsage.prompt += usageAccum.prompt;
