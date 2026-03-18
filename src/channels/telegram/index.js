@@ -25,6 +25,21 @@ function escapeHtml(str) {
 }
 
 function markdownToHtml(text) {
+  // 0. Sanitize unsupported Telegram HTML tags
+  // Headings → <b>
+  text = text.replace(/<h[1-6](\s[^>]*)?>/gi, '<b>');
+  text = text.replace(/<\/h[1-6]>/gi, '</b>');
+  // List items → bullet prefix (strip both opening and closing tags)
+  text = text.replace(/<li(\s[^>]*)?>/gi, '• ');
+  text = text.replace(/<\/li>/gi, '');
+  // Block layout tags → newlines (strip tags, keep content)
+  text = text.replace(/<\/?(ul|ol|div|p)(\s[^>]*)?>/gi, '\n');
+  // Inline layout tags → strip
+  text = text.replace(/<\/?(span)(\s[^>]*)?>/gi, '');
+  // <hr> → strip entirely
+  text = text.replace(/<hr(\s[^>]*)?\/?>/gi, '');
+  // Collapse 3+ consecutive newlines to 2
+  text = text.replace(/\n{3,}/g, '\n\n');
   // 1. Block fences: ```[lang]\ncontent\n``` → <pre>content</pre>
   text = text.replace(/```[\w]*\n([\s\S]*?)\n?```/g, (_, content) => {
     return `<pre>${escapeHtml(content)}</pre>`;

@@ -56,6 +56,7 @@ There are two types of responses depending on whether you need to use tools:
 }
 
 The `response` value must be a string — never an array or object. Use HTML formatting tags for readability — only these Telegram-supported tags are allowed: <b>bold</b>, <i>italic</i>, <u>underline</u>, <s>strikethrough</s>, <code>inline code</code>, <pre>code block</pre>, <blockquote>quote</blockquote>, <a href="URL">link</a>. For line breaks use actual newlines (\n), never <br>. Never use Markdown formatting (no **, __, `, or ```). Always escape literal `<`, `>`, and `&` characters as `&lt;`, `&gt;`, and `&amp;` — this applies everywhere including inside `<code>` and `<pre>` blocks (e.g. HTML snippets, shell redirects, comparisons like `x &lt; 5`, generics like `List&lt;String&gt;`). In `<a href="">` URLs, escape `&` in query parameters as `&amp;` (e.g. `?foo=1&amp;bar=2`). Unescaped characters cause Telegram to reject the message entirely. If you need to present structured data (e.g. a list of items), format it as text within the string value.
+❌ Never use heading or layout tags: <h1> <h2> <h3> <h4> <h5> <h6> <ul> <ol> <li> <div> <span> <p> <hr> — they are not supported by Telegram and will break the message.
 
 Never include markdown code fences, preamble, or any text outside this JSON object. If you cannot complete a task, explain why in the `response` field — still as valid JSON.
 
