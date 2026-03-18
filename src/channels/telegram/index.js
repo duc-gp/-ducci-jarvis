@@ -154,9 +154,15 @@ export async function startTelegramChannel(config) {
         }
       }
 
+      let lastCheckpointSent = null;
       let result;
       try {
-        result = await handleChat(config, sessionId, userText, allAttachments);
+        result = await handleChat(config, sessionId, userText, allAttachments, async (checkpointResponse) => {
+          const text = typeof checkpointResponse === 'string' ? checkpointResponse : JSON.stringify(checkpointResponse);
+          lastCheckpointSent = text;
+          await appendTelegramChatLog(chatId, sessions[chatId] || null, 'JARVIS', text);
+          await sendMessage(api, chatId, text, sessions[chatId] || null);
+        });
       } catch (e) {
         console.error(`[telegram] agent error chat_id=${chatId}: ${e.message}`);
         const errText = e.message
@@ -185,9 +191,16 @@ export async function startTelegramChannel(config) {
           : result.response != null ? JSON.stringify(result.response, null, 2) : '';
         const text = rawResponse.trim()
           || 'The agent encountered an error and could not produce a response. Please try again.';
-        await appendTelegramChatLog(chatId, result.sessionId, 'JARVIS', text);
-        await sendMessage(api, chatId, text, result.sessionId);
-        console.log(`[telegram] response sent chat_id=${chatId} length=${text.length}`);
+        // Skip sending if this response was already sent as a checkpoint update —
+        // intervention_required and zero-progress reuse the last checkpoint response
+        // as their finalResponse, which would otherwise cause a duplicate message.
+        if (text !== lastCheckpointSent) {
+          await appendTelegramChatLog(chatId, result.sessionId, 'JARVIS', text);
+          await sendMessage(api, chatId, text, result.sessionId);
+          console.log(`[telegram] response sent chat_id=${chatId} length=${text.length}`);
+        } else {
+          console.log(`[telegram] skipped duplicate final response chat_id=${chatId}`);
+        }
       } catch (e) {
         console.error(`[telegram] delivery error chat_id=${chatId}: ${e.message}`);
         await api.sendMessage(chatId, 'Sorry, something went wrong sending the response. Please try again.').catch(() => {});

@@ -618,7 +618,7 @@ export async function withSessionLock(sessionId, fn) {
  * Main entry point: handles a single POST /api/chat request.
  * Manages the handoff loop across multiple agent runs.
  */
-export async function handleChat(config, requestSessionId, userMessage, attachments = []) {
+export async function handleChat(config, requestSessionId, userMessage, attachments = [], onCheckpoint = null) {
   const sessionId = requestSessionId || crypto.randomUUID();
 
   // Serialize concurrent requests for the same session. Each request registers
@@ -632,7 +632,7 @@ export async function handleChat(config, requestSessionId, userMessage, attachme
   await previous;
 
   try {
-    return await _runHandleChat(config, sessionId, userMessage, attachments);
+    return await _runHandleChat(config, sessionId, userMessage, attachments, onCheckpoint);
   } finally {
     releaseLock();
     // Clean up only if no one else has queued behind us
@@ -646,7 +646,7 @@ export async function handleChat(config, requestSessionId, userMessage, attachme
  * The actual chat logic, extracted so handleChat can wrap it cleanly with the
  * session lock.
  */
-async function _runHandleChat(config, sessionId, userMessage, attachments = []) {
+async function _runHandleChat(config, sessionId, userMessage, attachments = [], onCheckpoint = null) {
   const client = createClient(config);
 
   const systemPromptTemplate = loadSystemPrompt();
@@ -802,7 +802,9 @@ async function _runHandleChat(config, sessionId, userMessage, attachments = []) 
         break;
       }
 
-      // Checkpoint reached — log this run
+      // Checkpoint reached — log this run and notify the caller (e.g. Telegram adapter)
+      // so intermediate progress is visible to the user instead of being swallowed
+      // by the handoff loop until the final response.
       await appendLog(sessionId, {
         iteration: run.iteration,
         model: config.selectedModel,
@@ -812,6 +814,7 @@ async function _runHandleChat(config, sessionId, userMessage, attachments = []) 
         logSummary: run.logSummary,
         status: 'checkpoint_reached',
       });
+      if (onCheckpoint) await onCheckpoint(run.response);
 
       // Accumulate failedApproaches from this run into session metadata so the
       // full history of failed strategies is available across all handoff runs.
