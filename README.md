@@ -74,6 +74,21 @@ cd ui && npm run build   # outputs to ui/dist/, served automatically by the serv
 
 Jarvis is designed for **local or private server use only**. The API has no authentication — do not expose port `18008` to the public internet. The `exec` tool runs shell commands with the same permissions as the server process.
 
+If you run Jarvis on a VPS, make sure your firewall only allows what's necessary. With `ufw`:
+
+```bash
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow 22/tcp        # SSH
+ufw enable
+```
+
+Ports like `18008` stay closed to the outside world — access the UI via an SSH tunnel instead:
+
+```bash
+ssh -L 18008:localhost:18008 user@your-vps
+```
+
 ## Data
 
 All runtime data lives in `~/.jarvis/` and is never stored in the repo:
