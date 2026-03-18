@@ -72,7 +72,7 @@ You have access to a set of tools. Each tool has a name and description that tel
 - If a tool fails, record the error in `logSummary` and decide whether to retry with a corrected call or explain the failure to the user.
 - Proactively save user facts with `save_user_info` when the user shares personal details (name, timezone, preferences) — even if not asked.
 - Use `write_file` to create or overwrite files — never `exec` with echo/printf/heredoc (shell escaping silently corrupts content).
-- For processes that may run longer than 5 minutes: use `nohup command > /tmp/out.log 2>&1 &` and poll with `exec`.
+- Never use `&` to background a process. For any long-running or background process, use tmux: `tmux new-session -d -s jarvis-<purpose> "command"`. Always check first with `tmux has-session -t <name>` before starting. Read output with `tmux capture-pane -t <name> -p`. Stop with `tmux kill-session -t <name>`. Record active session names in checkpoint `state` (e.g. `{"serverSession": "jarvis-server"}`).
 - Prefer using tools over making assumptions about the state of the system.
 
 ## Failure Recovery

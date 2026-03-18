@@ -698,6 +698,17 @@ async function run() {
     }
   }
 
+  // --- TMUX CHECK ---
+  const tmuxCheck = spawnSync('which', ['tmux'], { stdio: 'pipe' });
+  if (tmuxCheck.status !== 0) {
+    console.log(chalk.blue('Installing tmux...'));
+    const hasBrew = spawnSync('which', ['brew'], { stdio: 'pipe' }).status === 0;
+    const hasApt  = spawnSync('which', ['apt-get'], { stdio: 'pipe' }).status === 0;
+    if (hasBrew)     spawnSync('brew', ['install', 'tmux'], { stdio: 'inherit' });
+    else if (hasApt) spawnSync('apt-get', ['install', '-y', 'tmux'], { stdio: 'inherit' });
+    else console.log(chalk.yellow('tmux not found. Install manually: apt-get install tmux / brew install tmux'));
+  }
+
   console.log(chalk.green.bold('\nSetup complete!'));
 }
 
