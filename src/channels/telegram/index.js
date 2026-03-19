@@ -24,6 +24,12 @@ function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+function stripHtml(text) {
+  return text
+    .replace(/<[^>]+>/g, '')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+}
+
 function markdownToHtml(text) {
   // 0. Sanitize unsupported Telegram HTML tags
   // Headings → <b>
@@ -76,7 +82,7 @@ async function sendMessage(api, chatId, text, sessionId) {
             description: e.description || e.message,
           }) + '\n', 'utf8').catch(() => {});
         }
-        await api.sendMessage(chatId, chunk);
+        await api.sendMessage(chatId, stripHtml(chunk));
       } else {
         throw e;
       }
