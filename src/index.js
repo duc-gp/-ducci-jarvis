@@ -95,6 +95,15 @@ function pm2Restart() {
   });
 }
 
+function pm2Save() {
+  return new Promise((resolve, reject) => {
+    pm2.dump((err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+}
+
 const program = new Command();
 
 program
@@ -154,7 +163,9 @@ program
         return;
       }
       await pm2Start();
+      await pm2Save();
       console.log('Jarvis server started.');
+      console.log('Tip: run `pm2 startup` once to make Jarvis survive system reboots.');
       pm2.disconnect();
     } catch (e) {
       console.error('Failed to start Jarvis server:', e.message);
@@ -191,10 +202,13 @@ program
       const isRunning = desc.length > 0 && desc[0].pm2_env?.status === 'online';
       if (isRunning) {
         await pm2Restart();
+        await pm2Save();
         console.log('Jarvis server restarted.');
       } else {
         await pm2Start();
+        await pm2Save();
         console.log('Jarvis server started.');
+        console.log('Tip: run `pm2 startup` once to make Jarvis survive system reboots.');
       }
       pm2.disconnect();
     } catch (e) {

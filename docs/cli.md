@@ -33,6 +33,10 @@ Lifecycle management is handled by the CLI using the **programmatic PM2 API** fo
 - The process is named `jarvis-server`.
 - Enables `autorestart` on crash.
 - Merges logs into a single file in the user's data directory.
+- Calls `pm2 save` (`pm2.dump()`) after start to persist the process list for reboot recovery.
+- Prints a tip to run `pm2 startup` once to register the PM2 boot hook with the OS init system.
+
+> **Reboot persistence**: `pm2 save` persists the process list; `pm2 startup` (run once, may need sudo) installs the OS-level boot hook so PM2 — and therefore Jarvis — starts automatically after a system reboot.
 
 ### `jarvis stop`
 - Stops the background process named `jarvis-server` using PM2.

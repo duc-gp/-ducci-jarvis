@@ -710,6 +710,10 @@ async function run() {
   }
 
   console.log(chalk.green.bold('\nSetup complete!'));
+  console.log(chalk.cyan('\nNext steps:'));
+  console.log('  1. Run ' + chalk.bold('jarvis start') + ' to launch the server.');
+  console.log('  2. Run ' + chalk.bold('pm2 startup') + ' once to make Jarvis survive system reboots.');
+  console.log('     (Follow the command it prints — usually needs sudo on Linux.)');
 }
 
 run().catch(error => {
