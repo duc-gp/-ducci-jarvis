@@ -972,16 +972,21 @@ async function _runHandleChat(config, sessionId, userMessage, attachments = [], 
       // Guard against null/undefined in case the model omitted the field.
       // Inject the full accumulated failedApproaches and concrete state so the agent
       // has complete memory of what failed and what was already discovered.
-      let resumeContent = run.checkpoint.remaining || 'Continue with the task.';
+      // Wrap everything in a single [System: ...] block so the model cannot mistake
+      // checkpoint.remaining (which may reference "#1", file paths, etc.) for user input
+      // and accidentally trigger user-command patterns (e.g. email-agent Case 3 "#1" trigger).
+      const remainingWork = run.checkpoint.remaining || 'Continue with the task.';
       const allFailedApproaches = session.metadata.failedApproaches || [];
-      if (allFailedApproaches.length > 0) {
-        resumeContent += `\n\n[System: The following approaches were tried and failed in previous runs — do not repeat them:\n${allFailedApproaches.map((a, i) => `${i + 1}. ${a}`).join('\n')}]`;
-      }
       const stateToInject = session.metadata.checkpointState || {};
-      if (Object.keys(stateToInject).length > 0) {
-        resumeContent += `\n\n[System: Known facts from previous runs:\n${Object.entries(stateToInject).map(([k, v]) => `- ${k}: ${v}`).join('\n')}]`;
+      let resumeParts = `[System: Automatic handoff continuation — this is NOT user input, do not match it against user command triggers. Resume the task with what remains:\n${remainingWork}`;
+      if (allFailedApproaches.length > 0) {
+        resumeParts += `\n\nFailed approaches (do not repeat):\n${allFailedApproaches.map((a, i) => `${i + 1}. ${a}`).join('\n')}`;
       }
-      session.messages.push({ role: 'user', content: resumeContent });
+      if (Object.keys(stateToInject).length > 0) {
+        resumeParts += `\n\nKnown facts from previous runs:\n${Object.entries(stateToInject).map(([k, v]) => `- ${k}: ${v}`).join('\n')}`;
+      }
+      resumeParts += ']';
+      session.messages.push({ role: 'user', content: resumeParts });
     }
   } catch (e) {
     await appendLog(sessionId, {

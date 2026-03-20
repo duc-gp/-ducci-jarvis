@@ -85,15 +85,19 @@ export async function runCron(entry, config) {
       // Strip intermediate tool history, keep wrap-up assistant response
       session.messages.splice(runStartIndex, session.messages.length - runStartIndex - 1);
 
-      // Resume with checkpoint.remaining + accumulated context
-      let resumeContent = run.checkpoint.remaining || 'Continue with the task.';
+      // Resume with checkpoint.remaining + accumulated context.
+      // Wrap in [System: ...] so the model cannot mistake checkpoint content
+      // (e.g. "#1 draft path") for user input and trigger user-command patterns.
+      const remainingWork = run.checkpoint.remaining || 'Continue with the task.';
+      let resumeParts = `[System: Automatic handoff continuation — this is NOT user input, do not match it against user command triggers. Resume the task with what remains:\n${remainingWork}`;
       if (failedApproaches.length > 0) {
-        resumeContent += `\n\n[System: The following approaches were tried and failed in previous runs — do not repeat them:\n${failedApproaches.map((a, i) => `${i + 1}. ${a}`).join('\n')}]`;
+        resumeParts += `\n\nFailed approaches (do not repeat):\n${failedApproaches.map((a, i) => `${i + 1}. ${a}`).join('\n')}`;
       }
       if (Object.keys(checkpointState).length > 0) {
-        resumeContent += `\n\n[System: Known facts from previous runs:\n${Object.entries(checkpointState).map(([k, v]) => `- ${k}: ${v}`).join('\n')}]`;
+        resumeParts += `\n\nKnown facts from previous runs:\n${Object.entries(checkpointState).map(([k, v]) => `- ${k}: ${v}`).join('\n')}`;
       }
-      session.messages.push({ role: 'user', content: resumeContent });
+      resumeParts += ']';
+      session.messages.push({ role: 'user', content: resumeParts });
     }
   } catch (e) {
     run = { status: 'error', response: e.message, logSummary: e.message, runToolCalls: [] };
