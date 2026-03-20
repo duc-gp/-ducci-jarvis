@@ -377,7 +377,7 @@ async function run() {
     else settings.fallbackModel = 'openrouter/free';
   }
   if (settings.maxIterations === undefined) {
-    settings.maxIterations = 10;
+    settings.maxIterations = 20;
   }
   if (settings.maxHandoffs === undefined) {
     settings.maxHandoffs = 5;

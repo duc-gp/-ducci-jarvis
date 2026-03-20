@@ -69,7 +69,7 @@ export function loadConfig() {
     apiKey,
     selectedModel: settings.selectedModel,
     fallbackModel: settings.fallbackModel || (provider === 'anthropic' ? 'claude-haiku-4-5-20251001' : 'openrouter/free'),
-    maxIterations: settings.maxIterations || 10,
+    maxIterations: settings.maxIterations || 20,
     maxHandoffs: settings.maxHandoffs || 5,
     contextWindow: settings.contextWindow || 100,
     port: settings.port || 18008,
