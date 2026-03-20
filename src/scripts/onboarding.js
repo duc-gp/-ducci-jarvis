@@ -380,7 +380,7 @@ async function run() {
     settings.maxIterations = 20;
   }
   if (settings.maxHandoffs === undefined) {
-    settings.maxHandoffs = 5;
+    settings.maxHandoffs = 3;
   }
   if (settings.port === undefined) {
     settings.port = 18008;
