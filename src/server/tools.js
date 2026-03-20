@@ -550,6 +550,15 @@ const SEED_TOOLS = {
         const ts = new Date().toISOString();
         await fs.promises.mkdir(logDir, { recursive: true });
         await fs.promises.appendFile(logFile, ts + ' [CRON] ' + String(args.message).replace(/\\n/g, ' ') + '\\n', 'utf8');
+        if (sessionId) {
+          const convFile = path.join(process.env.HOME, '.jarvis/data/conversations/' + sessionId + '.json');
+          try {
+            const conv = JSON.parse(await fs.promises.readFile(convFile, 'utf8'));
+            conv.messages.push({ role: 'assistant', content: String(args.message) });
+            conv.metadata.updatedAt = ts;
+            await fs.promises.writeFile(convFile, JSON.stringify(conv, null, 2), 'utf8');
+          } catch {}
+        }
       } catch {}
       return { status: 'ok', chatId };
     `,

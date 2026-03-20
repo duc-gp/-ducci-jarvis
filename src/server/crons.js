@@ -1,12 +1,10 @@
 import fs from 'fs';
 import path from 'path';
-import { runAgentLoop, withSessionLock } from './agent.js';
+import { runAgentLoop } from './agent.js';
 import { createClient } from './provider.js';
 import { loadSystemPrompt, resolveSystemPrompt, PATHS } from './config.js';
-import { createSession, loadSession, saveSession } from './sessions.js';
+import { createSession } from './sessions.js';
 import * as cronScheduler from './cron-scheduler.js';
-import { load as loadTelegramSessions } from '../channels/telegram/sessions.js';
-
 function loadCrons() {
   try {
     return JSON.parse(fs.readFileSync(PATHS.cronsFile, 'utf8'));
@@ -21,25 +19,6 @@ async function appendCronLog(cronId, entry) {
   await fs.promises.appendFile(logFile, line, 'utf8');
 }
 
-async function writeSyntheticMessageToTelegramSession(entry, response, config) {
-  const chatId = config.telegram?.allowedUserIds?.[0];
-  if (!chatId) return;
-
-  const sessions = loadTelegramSessions();
-  const sessionId = sessions[chatId];
-  if (!sessionId) return;
-
-  const tz = config.timezone || 'Europe/Berlin';
-  const ts = new Date().toLocaleString('sv', { timeZone: tz }).slice(0, 16);
-  const syntheticMessage = `[Cron "${entry.name}" | ${ts}] ${response}`;
-
-  await withSessionLock(sessionId, async () => {
-    const session = await loadSession(sessionId);
-    if (!session) return;
-    session.messages.push({ role: 'assistant', content: syntheticMessage });
-    await saveSession(sessionId, session);
-  });
-}
 
 export async function runCron(entry, config) {
   console.log(`[cron] running "${entry.name}"`);
@@ -127,11 +106,6 @@ export async function runCron(entry, config) {
     response: run.response,
     logSummary: run.logSummary,
   }).catch(e => console.error(`[cron] log error: ${e.message}`));
-
-  // Write synthetic message to user's Telegram session
-  await writeSyntheticMessageToTelegramSession(entry, run.response, config).catch(e => {
-    console.error(`[cron] telegram session write error: ${e.message}`);
-  });
 
   // once: true — delete after firing
   if (entry.once) {
