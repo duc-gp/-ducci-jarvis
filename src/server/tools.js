@@ -543,7 +543,10 @@ const SEED_TOOLS = {
       try {
         const tgSessionsFile = path.join(process.env.HOME, '.jarvis/data/channels/telegram/sessions.json');
         const tgSessions = JSON.parse(await fs.promises.readFile(tgSessionsFile, 'utf8').catch(() => '{}'));
-        const sessionId = tgSessions[String(chatId)];
+        const chatData = tgSessions[String(chatId)];
+        const sessionId = typeof chatData === 'string'
+          ? chatData
+          : chatData?.slots?.[String(chatData?.active ?? 1)] ?? null;
         const prefix = sessionId ? String(sessionId).slice(0, 8) : 'unknown';
         const logDir = path.join(process.env.HOME, '.jarvis/telegram-chats');
         const logFile = path.join(logDir, String(chatId) + '-' + prefix + '.log');

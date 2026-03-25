@@ -98,15 +98,73 @@ export async function startTelegramChannel(config) {
   const bot = new Bot(token);
   const sessions = load();
 
-  // Tracks chats with an active agent run and buffers messages arriving during that run.
-  // When the run finishes all buffered messages are merged into one combined run.
+  // Tracks chats with an active agent run per slot.
+  // Keys are "chatId:slot" strings.
   const isRunning = new Set();
-  const pendingMessages = new Map(); // chatId -> [{text, attachments, ts}]
+  const pendingMessages = new Map(); // "chatId:slot" -> [{text, attachments, ts}]
+  const runStartTimes = new Map();   // "chatId:slot" -> Date
+
+  // --- Slot helpers ---
+  // sessions[chatId] is either:
+  //   - undefined (no session yet)
+  //   - string (legacy: single session ID, treated as slot 1)
+  //   - { active: number, slots: { "1": sessionId, "2": sessionId, ... } }
+
+  function getActiveSlot(chatId) {
+    const d = sessions[chatId];
+    if (!d || typeof d === 'string') return 1;
+    return d.active ?? 1;
+  }
+
+  function getSessionId(chatId, slot) {
+    const d = sessions[chatId];
+    if (!d) return null;
+    if (typeof d === 'string') return slot == 1 ? d : null;
+    return d.slots?.[String(slot)] ?? null;
+  }
+
+  function setSessionId(chatId, slot, sessionId) {
+    const d = sessions[chatId];
+    if (!d || typeof d === 'string') {
+      const legacy = typeof d === 'string' ? d : null;
+      sessions[chatId] = { active: Number(slot), slots: {} };
+      if (legacy) sessions[chatId].slots['1'] = legacy;
+    }
+    if (sessionId === null) {
+      delete sessions[chatId].slots[String(slot)];
+      if (Object.keys(sessions[chatId].slots).length === 0) {
+        delete sessions[chatId];
+      }
+    } else {
+      sessions[chatId].slots[String(slot)] = sessionId;
+    }
+    save(sessions);
+  }
+
+  function setActiveSlot(chatId, slot) {
+    const d = sessions[chatId];
+    if (!d || typeof d === 'string') {
+      const legacy = typeof d === 'string' ? d : null;
+      sessions[chatId] = { active: Number(slot), slots: {} };
+      if (legacy) sessions[chatId].slots['1'] = legacy;
+    } else {
+      sessions[chatId].active = Number(slot);
+    }
+    save(sessions);
+  }
+
+  function slotKey(chatId, slot) {
+    return `${chatId}:${slot}`;
+  }
+
+  // --- Commands ---
 
   await bot.api.setMyCommands([
-    { command: 'new', description: 'Start a fresh session' },
-    { command: 'usage', description: 'Show token usage for the current session' },
-    { command: 'stop', description: 'Stop the current run' },
+    { command: 'new',   description: 'Reset the active slot (fresh session)' },
+    { command: 'usage', description: 'Token usage for the active slot' },
+    { command: 'stop',  description: 'Stop the running agent on the active slot' },
+    { command: 'slots', description: 'Show all slots and their status' },
+    { command: 'slot',  description: 'Switch or delete a slot: /slot 2 or /slot del 2' },
   ]);
 
   bot.command('usage', async (ctx) => {
@@ -114,7 +172,8 @@ export async function startTelegramChannel(config) {
     if (!allowedUserIds.includes(userId)) return;
 
     const chatId = ctx.chat.id;
-    const sessionId = sessions[chatId];
+    const slot = getActiveSlot(chatId);
+    const sessionId = getSessionId(chatId, slot);
     if (!sessionId) {
       await ctx.reply('No active session. Send a message to start one.');
       return;
@@ -134,7 +193,7 @@ export async function startTelegramChannel(config) {
       ? `\nCache read:    ${cacheRead.toLocaleString()}\nCache written: ${cacheCreation.toLocaleString()}`
       : '';
     await ctx.reply(
-      `Token usage for current session:\nIn:    ${u.prompt.toLocaleString()}\nOut:   ${u.completion.toLocaleString()}\nTotal: ${total.toLocaleString()}${cacheLines}`
+      `Token usage for slot ${slot}:\nIn:    ${u.prompt.toLocaleString()}\nOut:   ${u.completion.toLocaleString()}\nTotal: ${total.toLocaleString()}${cacheLines}`
     );
   });
 
@@ -143,9 +202,11 @@ export async function startTelegramChannel(config) {
     if (!allowedUserIds.includes(userId)) return;
 
     const chatId = ctx.chat.id;
-    const sessionId = sessions[chatId];
+    const slot = getActiveSlot(chatId);
+    const sessionId = getSessionId(chatId, slot);
+    const key = slotKey(chatId, slot);
 
-    if (!isRunning.has(chatId) || !sessionId) {
+    if (!isRunning.has(key) || !sessionId) {
       await ctx.reply('Nothing is currently running.');
       return;
     }
@@ -160,24 +221,127 @@ export async function startTelegramChannel(config) {
     if (!allowedUserIds.includes(userId)) return;
 
     const chatId = ctx.chat.id;
-    pendingMessages.delete(chatId);
-    if (sessions[chatId]) {
-      await appendTelegramChatLog(chatId, sessions[chatId], 'SYSTEM', '--- /new: session reset ---');
-      delete sessions[chatId];
-      save(sessions);
-      console.log(`[telegram] session unlinked chat_id=${chatId}`);
+    const slot = getActiveSlot(chatId);
+    const key = slotKey(chatId, slot);
+    pendingMessages.delete(key);
+    const oldSessionId = getSessionId(chatId, slot);
+    if (oldSessionId) {
+      await appendTelegramChatLog(chatId, oldSessionId, 'SYSTEM', '--- /new: session reset ---');
+      setSessionId(chatId, slot, null);
+      console.log(`[telegram] session unlinked chat_id=${chatId} slot=${slot}`);
     }
 
-    await ctx.reply('New session started.');
+    await ctx.reply(`New session started on slot ${slot}.`);
+  });
+
+  bot.command('slots', async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!allowedUserIds.includes(userId)) return;
+
+    const chatId = ctx.chat.id;
+    const d = sessions[chatId];
+    const activeSlot = getActiveSlot(chatId);
+
+    const slotsMap = {};
+    if (typeof d === 'string') {
+      slotsMap['1'] = d;
+    } else if (d && d.slots) {
+      Object.assign(slotsMap, d.slots);
+    }
+
+    const slotNums = [...new Set(['1', ...Object.keys(slotsMap)])].sort((a, b) => Number(a) - Number(b));
+
+    const lines = ['<b>Slots:</b>'];
+    for (const sn of slotNums) {
+      const n = Number(sn);
+      const sid = slotsMap[sn] ?? null;
+      const key = slotKey(chatId, n);
+      const activeMarker = n === activeSlot ? ' ← aktiv' : '';
+      let statusIcon;
+      if (isRunning.has(key)) {
+        const startTime = runStartTimes.get(key);
+        let elapsed = '';
+        if (startTime) {
+          const secs = Math.floor((Date.now() - startTime.getTime()) / 1000);
+          const m = Math.floor(secs / 60);
+          const s = secs % 60;
+          elapsed = m > 0 ? ` (seit ${m}m ${s}s)` : ` (seit ${s}s)`;
+        }
+        statusIcon = `🟢 läuft${elapsed}`;
+      } else if (sid) {
+        statusIcon = '💬 bereit';
+      } else {
+        statusIcon = '➕ leer';
+      }
+      lines.push(`Slot ${n}: ${statusIcon}${activeMarker}`);
+    }
+
+    // Always show one empty slot beyond the highest existing one
+    const maxSlot = Math.max(...slotNums.map(Number));
+    const nextSlot = maxSlot + 1;
+    if (!isRunning.has(slotKey(chatId, nextSlot)) && !slotsMap[String(nextSlot)]) {
+      lines.push(`Slot ${nextSlot}: ➕ leer`);
+    }
+
+    await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' });
+  });
+
+  bot.command('slot', async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!allowedUserIds.includes(userId)) return;
+
+    const chatId = ctx.chat.id;
+    const args = (ctx.match || '').trim().split(/\s+/).filter(Boolean);
+
+    // /slot del N
+    if (args[0] === 'del') {
+      const n = parseInt(args[1], 10);
+      if (!n || n < 1) { await ctx.reply('Usage: /slot del <number>'); return; }
+      const key = slotKey(chatId, n);
+      if (isRunning.has(key) || pendingMessages.has(key)) {
+        await ctx.reply(`Slot ${n} ist gerade aktiv. Erst /stop, dann löschen.`);
+        return;
+      }
+      const oldSid = getSessionId(chatId, n);
+      if (oldSid) {
+        await appendTelegramChatLog(chatId, oldSid, 'SYSTEM', `--- /slot del ${n} ---`);
+      }
+      setSessionId(chatId, n, null);
+      pendingMessages.delete(key);
+      runStartTimes.delete(key);
+      if (getActiveSlot(chatId) === n) {
+        setActiveSlot(chatId, 1);
+        await ctx.reply(`Slot ${n} gelöscht. Zu Slot 1 gewechselt.`);
+      } else {
+        await ctx.reply(`Slot ${n} gelöscht.`);
+      }
+      return;
+    }
+
+    // /slot N — switch active slot
+    const n = parseInt(args[0], 10);
+    if (!n || n < 1) { await ctx.reply('Usage: /slot <number> oder /slot del <number>'); return; }
+    setActiveSlot(chatId, n);
+    const sid = getSessionId(chatId, n);
+    const key = slotKey(chatId, n);
+    let status;
+    if (isRunning.has(key)) {
+      status = '🟢 läuft';
+    } else if (sid) {
+      status = '💬 bereit (vorhandene Session)';
+    } else {
+      status = '➕ leer (neue Session beim nächsten Message)';
+    }
+    await ctx.reply(`Slot ${n} ist jetzt aktiv. Status: ${status}`);
   });
 
   // Runs one or more batches until the pending queue is drained.
   // Each iteration takes all currently pending messages, merges them into a
   // single user turn, calls handleChat once, and sends one response.
-  async function processQueue(api, chatId, firstBatch) {
+  async function processQueue(api, chatId, slot, firstBatch) {
     let batch = firstBatch;
     while (batch.length > 0) {
-      const sessionId = sessions[chatId] || null;
+      const sessionId = getSessionId(chatId, slot) || null;
       const combinedText = batch.length === 1
         ? batch[0].text
         : batch.map(m => m.text).join('\n\n');
@@ -213,28 +377,30 @@ export async function startTelegramChannel(config) {
 
       let lastCheckpointSent = null;
       let result;
+      const key = slotKey(chatId, slot);
       try {
         result = await handleChat(config, sessionId, userText, allAttachments, async (checkpointResponse) => {
-          const text = typeof checkpointResponse === 'string' ? checkpointResponse : JSON.stringify(checkpointResponse);
-          lastCheckpointSent = text;
-          await appendTelegramChatLog(chatId, sessions[chatId] || null, 'JARVIS', text);
-          await sendMessage(api, chatId, text, sessions[chatId] || null);
+          const rawText = typeof checkpointResponse === 'string' ? checkpointResponse : JSON.stringify(checkpointResponse);
+          const currentActive = getActiveSlot(chatId);
+          const prefixed = slot !== currentActive ? `[Slot ${slot}] ${rawText}` : rawText;
+          lastCheckpointSent = prefixed;
+          await appendTelegramChatLog(chatId, getSessionId(chatId, slot) || null, 'JARVIS', prefixed);
+          await sendMessage(api, chatId, prefixed, getSessionId(chatId, slot) || null);
         });
       } catch (e) {
-        console.error(`[telegram] agent error chat_id=${chatId}: ${e.message}`);
+        console.error(`[telegram] agent error chat_id=${chatId} slot=${slot}: ${e.message}`);
         const errText = e.message
           ? `Sorry, something went wrong: ${e.message}`
           : 'Sorry, something went wrong. Please try again.';
         await api.sendMessage(chatId, errText).catch(() => {});
-        batch = pendingMessages.get(chatId) || [];
-        pendingMessages.delete(chatId);
+        batch = pendingMessages.get(key) || [];
+        pendingMessages.delete(key);
         continue;
       }
 
-      if (!sessions[chatId]) {
-        sessions[chatId] = result.sessionId;
-        save(sessions);
-        console.log(`[telegram] session created sessionId=${result.sessionId.slice(0, 8)}`);
+      if (!getSessionId(chatId, slot)) {
+        setSessionId(chatId, slot, result.sessionId);
+        console.log(`[telegram] session created slot=${slot} sessionId=${result.sessionId.slice(0, 8)}`);
       }
 
       // Log each original message individually with its own timestamp
@@ -248,24 +414,27 @@ export async function startTelegramChannel(config) {
           : result.response != null ? JSON.stringify(result.response, null, 2) : '';
         const text = rawResponse.trim()
           || 'The agent encountered an error and could not produce a response. Please try again.';
+        // Prefix response with slot number if the user has switched away from this slot
+        const currentActive = getActiveSlot(chatId);
+        const displayText = slot !== currentActive ? `[Slot ${slot}] ${text}` : text;
         // Skip sending if this response was already sent as a checkpoint update —
         // intervention_required and zero-progress reuse the last checkpoint response
         // as their finalResponse, which would otherwise cause a duplicate message.
-        if (text !== lastCheckpointSent) {
-          await appendTelegramChatLog(chatId, result.sessionId, 'JARVIS', text);
-          await sendMessage(api, chatId, text, result.sessionId);
-          console.log(`[telegram] response sent chat_id=${chatId} length=${text.length}`);
+        if (displayText !== lastCheckpointSent) {
+          await appendTelegramChatLog(chatId, result.sessionId, 'JARVIS', displayText);
+          await sendMessage(api, chatId, displayText, result.sessionId);
+          console.log(`[telegram] response sent chat_id=${chatId} slot=${slot} length=${displayText.length}`);
         } else {
-          console.log(`[telegram] skipped duplicate final response chat_id=${chatId}`);
+          console.log(`[telegram] skipped duplicate final response chat_id=${chatId} slot=${slot}`);
         }
       } catch (e) {
-        console.error(`[telegram] delivery error chat_id=${chatId}: ${e.message}`);
+        console.error(`[telegram] delivery error chat_id=${chatId} slot=${slot}: ${e.message}`);
         await api.sendMessage(chatId, 'Sorry, something went wrong sending the response. Please try again.').catch(() => {});
       }
 
       // Drain any messages that arrived while we were running
-      batch = pendingMessages.get(chatId) || [];
-      pendingMessages.delete(chatId);
+      batch = pendingMessages.get(key) || [];
+      pendingMessages.delete(key);
     }
   }
 
@@ -296,25 +465,29 @@ export async function startTelegramChannel(config) {
     }
 
     const entry = { text: ctx.message.caption || '', attachments: [attachment], ts };
+    const slot = getActiveSlot(chatId);
+    const key = slotKey(chatId, slot);
 
-    if (isRunning.has(chatId)) {
-      if (!pendingMessages.has(chatId)) pendingMessages.set(chatId, []);
-      pendingMessages.get(chatId).push(entry);
-      console.log(`[telegram] buffered photo chat_id=${chatId} pending=${pendingMessages.get(chatId).length}`);
+    if (isRunning.has(key)) {
+      if (!pendingMessages.has(key)) pendingMessages.set(key, []);
+      pendingMessages.get(key).push(entry);
+      console.log(`[telegram] buffered photo chat_id=${chatId} slot=${slot} pending=${pendingMessages.get(key).length}`);
       return;
     }
 
-    isRunning.add(chatId);
+    isRunning.add(key);
+    runStartTimes.set(key, new Date());
     await ctx.api.sendChatAction(chatId, 'typing');
     const typingInterval = setInterval(() => {
       ctx.api.sendChatAction(chatId, 'typing').catch(() => {});
     }, 4000);
 
     try {
-      await processQueue(ctx.api, chatId, [entry]);
+      await processQueue(ctx.api, chatId, slot, [entry]);
     } finally {
       clearInterval(typingInterval);
-      isRunning.delete(chatId);
+      isRunning.delete(key);
+      runStartTimes.delete(key);
     }
   });
 
@@ -327,26 +500,30 @@ export async function startTelegramChannel(config) {
     const chatId = ctx.chat.id;
     const ts = new Date().toISOString();
     const entry = { text: ctx.message.text, attachments: [], ts };
+    const slot = getActiveSlot(chatId);
+    const key = slotKey(chatId, slot);
 
-    if (isRunning.has(chatId)) {
-      if (!pendingMessages.has(chatId)) pendingMessages.set(chatId, []);
-      pendingMessages.get(chatId).push(entry);
-      console.log(`[telegram] buffered message chat_id=${chatId} pending=${pendingMessages.get(chatId).length}`);
+    if (isRunning.has(key)) {
+      if (!pendingMessages.has(key)) pendingMessages.set(key, []);
+      pendingMessages.get(key).push(entry);
+      console.log(`[telegram] buffered message chat_id=${chatId} slot=${slot} pending=${pendingMessages.get(key).length}`);
       return;
     }
 
-    isRunning.add(chatId);
-    console.log(`[telegram] incoming chat_id=${chatId}`);
+    isRunning.add(key);
+    runStartTimes.set(key, new Date());
+    console.log(`[telegram] incoming chat_id=${chatId} slot=${slot}`);
     await ctx.api.sendChatAction(chatId, 'typing');
     const typingInterval = setInterval(() => {
       ctx.api.sendChatAction(chatId, 'typing').catch(() => {});
     }, 4000);
 
     try {
-      await processQueue(ctx.api, chatId, [entry]);
+      await processQueue(ctx.api, chatId, slot, [entry]);
     } finally {
       clearInterval(typingInterval);
-      isRunning.delete(chatId);
+      isRunning.delete(key);
+      runStartTimes.delete(key);
     }
   });
 
