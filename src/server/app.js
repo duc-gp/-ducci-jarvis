@@ -196,8 +196,8 @@ function startServer() {
   app.locals.config = config;
 
   const PORT = config.port;
-  app.listen(PORT, () => {
-    console.log(`Jarvis server listening on port ${PORT}`);
+  app.listen(PORT, '127.0.0.1', () => {
+    console.log(`Jarvis server listening on 127.0.0.1:${PORT}`);
     startTelegramChannel(config);
   });
 }
