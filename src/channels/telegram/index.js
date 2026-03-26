@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { Bot } from 'grammy';
+import { Bot, InlineKeyboard } from 'grammy';
 import { run } from '@grammyjs/runner';
 import { handleChat, requestAbort } from '../../server/agent.js';
 import { loadSession } from '../../server/sessions.js';
@@ -164,7 +164,6 @@ export async function startTelegramChannel(config) {
     { command: 'usage', description: 'Token usage for the active slot' },
     { command: 'stop',  description: 'Stop the running agent on the active slot' },
     { command: 'slots', description: 'Show all slots and their status' },
-    { command: 'slot',  description: 'Switch or delete a slot: /slot 2 or /slot del 2' },
   ]);
 
   bot.command('usage', async (ctx) => {
@@ -234,11 +233,7 @@ export async function startTelegramChannel(config) {
     await ctx.reply(`New session started on slot ${slot}.`);
   });
 
-  bot.command('slots', async (ctx) => {
-    const userId = ctx.from?.id;
-    if (!allowedUserIds.includes(userId)) return;
-
-    const chatId = ctx.chat.id;
+  function buildSlotsDisplay(chatId) {
     const d = sessions[chatId];
     const activeSlot = getActiveSlot(chatId);
 
@@ -250,7 +245,10 @@ export async function startTelegramChannel(config) {
     }
 
     const slotNums = [...new Set(['1', ...Object.keys(slotsMap)])].sort((a, b) => Number(a) - Number(b));
+    const maxSlot = Math.max(...slotNums.map(Number));
+    const nextSlot = maxSlot + 1;
 
+    // Status text
     const lines = ['<b>Slots:</b>'];
     for (const sn of slotNums) {
       const n = Number(sn);
@@ -275,64 +273,93 @@ export async function startTelegramChannel(config) {
       }
       lines.push(`Slot ${n}: ${statusIcon}${activeMarker}`);
     }
-
-    // Always show one empty slot beyond the highest existing one
-    const maxSlot = Math.max(...slotNums.map(Number));
-    const nextSlot = maxSlot + 1;
     if (!isRunning.has(slotKey(chatId, nextSlot)) && !slotsMap[String(nextSlot)]) {
       lines.push(`Slot ${nextSlot}: ➕ leer`);
     }
 
-    await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' });
-  });
+    // Inline keyboard
+    const kb = new InlineKeyboard();
+    for (const sn of slotNums) {
+      const n = Number(sn);
+      const sid = slotsMap[sn] ?? null;
+      const key = slotKey(chatId, n);
+      const running = isRunning.has(key);
+      if (n === activeSlot) {
+        kb.text(`✓ Slot ${n} (aktiv)`, `slots_noop`);
+      } else {
+        kb.text(`↩️ Slot ${n}`, `slots_switch_${n}`);
+      }
+      if (sid && !running) {
+        kb.text(`🗑️`, `slots_del_${n}`);
+      }
+      kb.row();
+    }
+    // Button for the next empty slot
+    kb.text(`➕ Slot ${nextSlot} (neu)`, `slots_switch_${nextSlot}`);
 
-  bot.command('slot', async (ctx) => {
+    return { text: lines.join('\n'), keyboard: kb };
+  }
+
+  bot.command('slots', async (ctx) => {
     const userId = ctx.from?.id;
     if (!allowedUserIds.includes(userId)) return;
 
     const chatId = ctx.chat.id;
-    const args = (ctx.match || '').trim().split(/\s+/).filter(Boolean);
+    const { text, keyboard } = buildSlotsDisplay(chatId);
+    await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard });
+  });
 
-    // /slot del N
-    if (args[0] === 'del') {
-      const n = parseInt(args[1], 10);
-      if (!n || n < 1) { await ctx.reply('Usage: /slot del <number>'); return; }
-      const key = slotKey(chatId, n);
-      if (isRunning.has(key) || pendingMessages.has(key)) {
-        await ctx.reply(`Slot ${n} ist gerade aktiv. Erst /stop, dann löschen.`);
-        return;
-      }
-      const oldSid = getSessionId(chatId, n);
-      if (oldSid) {
-        await appendTelegramChatLog(chatId, oldSid, 'SYSTEM', `--- /slot del ${n} ---`);
-      }
-      setSessionId(chatId, n, null);
-      pendingMessages.delete(key);
-      runStartTimes.delete(key);
-      if (getActiveSlot(chatId) === n) {
-        setActiveSlot(chatId, 1);
-        await ctx.reply(`Slot ${n} gelöscht. Zu Slot 1 gewechselt.`);
-      } else {
-        await ctx.reply(`Slot ${n} gelöscht.`);
-      }
+  bot.callbackQuery(/^slots_switch_(\d+)$/, async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!allowedUserIds.includes(userId)) { await ctx.answerCallbackQuery(); return; }
+
+    const chatId = ctx.chat.id;
+    const n = parseInt(ctx.match[1], 10);
+    setActiveSlot(chatId, n);
+    const key = slotKey(chatId, n);
+    const sid = getSessionId(chatId, n);
+    let status;
+    if (isRunning.has(key)) status = '🟢 läuft';
+    else if (sid) status = '💬 bereit';
+    else status = '➕ leer (neue Session beim nächsten Message)';
+
+    const { text, keyboard } = buildSlotsDisplay(chatId);
+    await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard });
+    await ctx.answerCallbackQuery(`Slot ${n} aktiv — ${status}`);
+  });
+
+  bot.callbackQuery(/^slots_del_(\d+)$/, async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!allowedUserIds.includes(userId)) { await ctx.answerCallbackQuery(); return; }
+
+    const chatId = ctx.chat.id;
+    const n = parseInt(ctx.match[1], 10);
+    const key = slotKey(chatId, n);
+
+    if (isRunning.has(key) || pendingMessages.has(key)) {
+      await ctx.answerCallbackQuery(`Slot ${n} läuft gerade — erst /stop`);
       return;
     }
 
-    // /slot N — switch active slot
-    const n = parseInt(args[0], 10);
-    if (!n || n < 1) { await ctx.reply('Usage: /slot <number> oder /slot del <number>'); return; }
-    setActiveSlot(chatId, n);
-    const sid = getSessionId(chatId, n);
-    const key = slotKey(chatId, n);
-    let status;
-    if (isRunning.has(key)) {
-      status = '🟢 läuft';
-    } else if (sid) {
-      status = '💬 bereit (vorhandene Session)';
-    } else {
-      status = '➕ leer (neue Session beim nächsten Message)';
+    const oldSid = getSessionId(chatId, n);
+    if (oldSid) {
+      await appendTelegramChatLog(chatId, oldSid, 'SYSTEM', `--- slot del ${n} (via keyboard) ---`);
     }
-    await ctx.reply(`Slot ${n} ist jetzt aktiv. Status: ${status}`);
+    setSessionId(chatId, n, null);
+    pendingMessages.delete(key);
+    runStartTimes.delete(key);
+
+    if (getActiveSlot(chatId) === n) {
+      setActiveSlot(chatId, 1);
+    }
+
+    const { text, keyboard } = buildSlotsDisplay(chatId);
+    await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard });
+    await ctx.answerCallbackQuery(`Slot ${n} gelöscht`);
+  });
+
+  bot.callbackQuery('slots_noop', async (ctx) => {
+    await ctx.answerCallbackQuery();
   });
 
   // Runs one or more batches until the pending queue is drained.
