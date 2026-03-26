@@ -571,12 +571,13 @@ const SEED_TOOLS = {
       type: 'function',
       function: {
         name: 'read_cron_log',
-        description: 'Read cron execution logs. Without id: returns recent runs across all crons (last 8 most recently active cron files, 5 entries each). With id: returns runs for that specific cron.',
+        description: 'Read cron execution logs. Without id: returns recent runs across all crons (last 8 most recently active cron files, 5 entries each). With id: returns runs for that specific cron. Each cron execution logs one entry per handoff. Use verbose:true to include tool call details for debugging.',
         parameters: {
           type: 'object',
           properties: {
             id: { type: 'string', description: 'The cron id. Omit to get an overview across all crons.' },
             limit: { type: 'number', description: 'Max entries to return when reading a specific cron. Defaults to 20.' },
+            verbose: { type: 'boolean', description: 'Include toolCalls array in each entry. Default false.' },
           },
           required: [],
         },
@@ -584,6 +585,12 @@ const SEED_TOOLS = {
     },
     code: `
       const logsDir = path.join(process.env.HOME, '.jarvis/logs');
+      const verbose = !!args.verbose;
+      function strip(entry) {
+        if (verbose) return entry;
+        const { toolCalls, ...rest } = entry;
+        return rest;
+      }
       if (!args.id) {
         const files = await fs.promises.readdir(logsDir).catch(() => []);
         const cronFiles = files.filter(f => f.startsWith('cron-') && f.endsWith('.jsonl'));
@@ -596,7 +603,7 @@ const SEED_TOOLS = {
         for (const { file } of withMtime.slice(0, 8)) {
           const content = await fs.promises.readFile(path.join(logsDir, file), 'utf8').catch(() => '');
           const lines = content.trim().split('\\n').filter(Boolean);
-          allEntries.push(...lines.slice(-5).map(line => JSON.parse(line)));
+          allEntries.push(...lines.slice(-5).map(line => strip(JSON.parse(line))));
         }
         allEntries.sort((a, b) => new Date(b.ts) - new Date(a.ts));
         return { status: 'ok', entries: allEntries };
@@ -604,7 +611,7 @@ const SEED_TOOLS = {
       const logFile = path.join(logsDir, 'cron-' + args.id + '.jsonl');
       const content = await fs.promises.readFile(logFile, 'utf8').catch(() => '');
       const lines = content.trim().split('\\n').filter(Boolean);
-      const entries = lines.slice(-(args.limit || 20)).map(line => JSON.parse(line));
+      const entries = lines.slice(-(args.limit || 20)).map(line => strip(JSON.parse(line)));
       return { status: 'ok', entries };
     `,
   },

@@ -1,5 +1,11 @@
 import fs from 'fs';
 import path from 'path';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+const execAsync = promisify(exec);
+import { createRequire } from 'module';
+const _require = createRequire(import.meta.url);
+const { version: JARVIS_VERSION } = _require('../../../package.json');
 import { Bot, InlineKeyboard } from 'grammy';
 import { run } from '@grammyjs/runner';
 import { handleChat, requestAbort } from '../../server/agent.js';
@@ -90,6 +96,33 @@ async function sendMessage(api, chatId, text, sessionId) {
   }
 }
 
+// Known model context windows in tokens. Used by /context command.
+// Partial match: checked with model.includes(key) so short keys like 'gpt-4o' match 'openrouter/gpt-4o'.
+const MODEL_CONTEXT_WINDOWS = {
+  'claude': 200000,         // all claude models (opus, sonnet, haiku)
+  'gpt-4o': 128000,
+  'gpt-4-turbo': 128000,
+  'gpt-3.5': 16385,
+  'gemini-1.5-pro': 1000000,
+  'gemini-1.5-flash': 1000000,
+  'gemini-2': 1000000,
+  'llama-3.3': 128000,
+  'llama-3.1': 128000,
+  'mistral': 32000,
+  'deepseek': 64000,
+  'glm-5': 200000,
+  'glm-4': 128000,
+};
+
+function lookupContextWindow(model) {
+  if (!model) return null;
+  const m = model.toLowerCase();
+  for (const [key, size] of Object.entries(MODEL_CONTEXT_WINDOWS)) {
+    if (m.includes(key)) return size;
+  }
+  return null;
+}
+
 export async function startTelegramChannel(config) {
   const { token, allowedUserIds } = config.telegram;
 
@@ -160,10 +193,14 @@ export async function startTelegramChannel(config) {
   // --- Commands ---
 
   await bot.api.setMyCommands([
-    { command: 'new',   description: 'Reset the active slot (fresh session)' },
-    { command: 'usage', description: 'Token usage for the active slot' },
-    { command: 'stop',  description: 'Stop the running agent on the active slot' },
-    { command: 'slots', description: 'Show all slots and their status' },
+    { command: 'new',     description: 'Reset the active slot (fresh session)' },
+    { command: 'usage',   description: 'Token usage for the active slot' },
+    { command: 'context', description: 'Estimated context size vs model limit' },
+    { command: 'stop',    description: 'Stop the running agent on the active slot' },
+    { command: 'slots',   description: 'Show all slots and their status' },
+    { command: 'version', description: 'Show Jarvis version' },
+    { command: 'update',  description: 'Update Jarvis to the latest version' },
+    { command: 'restart', description: 'Restart Jarvis' },
   ]);
 
   bot.command('usage', async (ctx) => {
@@ -194,6 +231,75 @@ export async function startTelegramChannel(config) {
     await ctx.reply(
       `Token usage for slot ${slot}:\nIn:    ${u.prompt.toLocaleString()}\nOut:   ${u.completion.toLocaleString()}\nTotal: ${total.toLocaleString()}${cacheLines}`
     );
+  });
+
+  bot.command('version', async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!allowedUserIds.includes(userId)) return;
+    await ctx.reply(`Jarvis v${JARVIS_VERSION}`);
+  });
+
+  bot.command('update', async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!allowedUserIds.includes(userId)) return;
+    await ctx.reply('Updating Jarvis...');
+    try {
+      const { stdout, stderr } = await execAsync('npm install -g @ducci/jarvis@latest', { timeout: 120000 });
+      const out = (stdout + stderr).trim().slice(-1000) || 'Done.';
+      await ctx.api.sendMessage(ctx.chat.id, `Update complete:\n${out}`);
+    } catch (e) {
+      await ctx.api.sendMessage(ctx.chat.id, `Update failed:\n${e.message.slice(0, 1000)}`);
+    }
+  });
+
+  bot.command('restart', async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!allowedUserIds.includes(userId)) return;
+    await ctx.reply('Restarting Jarvis...');
+    // Fire and forget — process will exit before a response could be sent
+    setTimeout(() => execAsync('jarvis restart').catch(() => {}), 500);
+  });
+
+  bot.command('context', async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!allowedUserIds.includes(userId)) return;
+
+    const chatId = ctx.chat.id;
+    const slot = getActiveSlot(chatId);
+    const sessionId = getSessionId(chatId, slot);
+    if (!sessionId) {
+      await ctx.reply('No active session. Send a message to start one.');
+      return;
+    }
+
+    const session = await loadSession(sessionId);
+    if (!session) {
+      await ctx.reply('Could not load session.');
+      return;
+    }
+
+    const msgCount = Math.max(0, session.messages.length - 1); // exclude system prompt
+    const estimatedTokens = Math.round(JSON.stringify(session.messages).length / 4);
+    const model = config.selectedModel || 'unknown';
+    const contextWindow = config.modelContextWindow || lookupContextWindow(model);
+
+    let lines = [
+      `<b>Context — Slot ${slot}</b>`,
+      `Model: <code>${escapeHtml(model)}</code>`,
+      `Messages in history: ${msgCount}`,
+      `Estimated tokens: ~${estimatedTokens.toLocaleString()}`,
+    ];
+
+    if (contextWindow) {
+      const pct = Math.round((estimatedTokens / contextWindow) * 100);
+      const bar = pct >= 90 ? '🔴' : pct >= 70 ? '🟡' : '🟢';
+      lines.push(`Model context window: ${contextWindow.toLocaleString()}`);
+      lines.push(`Usage: ${bar} ~${pct}%`);
+    } else {
+      lines.push(`Model context window: unknown`);
+    }
+
+    await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' });
   });
 
   bot.command('stop', async (ctx) => {

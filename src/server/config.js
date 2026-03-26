@@ -72,6 +72,7 @@ export function loadConfig() {
     maxIterations: settings.maxIterations || 20,
     maxHandoffs: settings.maxHandoffs || 3,
     contextWindow: settings.contextWindow || 100,
+    modelContextWindow: settings.modelContextWindow || null,
     port: settings.port || 18008,
     telegram: {
       token: process.env.TELEGRAM_BOT_TOKEN || null,

@@ -45,6 +45,15 @@ export async function runCron(entry, config) {
   const failedApproaches = [];
   const checkpointState = {};
 
+  // Compact tool call representation for logs: "tool_name first_arg_value"
+  function compactToolCalls(toolCalls) {
+    return (toolCalls || []).map(tc => {
+      const firstVal = Object.values(tc.args || {})[0];
+      const argStr = firstVal !== undefined ? ' ' + String(firstVal).slice(0, 80) : '';
+      return `${tc.name}${argStr}`;
+    });
+  }
+
   try {
     while (true) {
       const runStartIndex = session.messages.length;
@@ -53,8 +62,24 @@ export async function runCron(entry, config) {
         run = await runAgentLoop(client, config, session, prepareMessages, usageAccum);
       } catch (e) {
         run = { status: 'error', response: e.message, logSummary: e.message, runToolCalls: [] };
+        await appendCronLog(entry.id, {
+          cronName: entry.name,
+          handoff: handoffCount + 1,
+          status: run.status,
+          logSummary: run.logSummary,
+          toolCalls: [],
+        }).catch(e => console.error(`[cron] log error: ${e.message}`));
         break;
       }
+
+      await appendCronLog(entry.id, {
+        cronName: entry.name,
+        handoff: handoffCount + 1,
+        status: run.status,
+        logSummary: run.logSummary,
+        ...(run.status !== 'checkpoint_reached' && { response: run.response }),
+        toolCalls: compactToolCalls(run.runToolCalls),
+      }).catch(e => console.error(`[cron] log error: ${e.message}`));
 
       if (run.status !== 'checkpoint_reached') break;
 
@@ -102,14 +127,6 @@ export async function runCron(entry, config) {
   } catch (e) {
     run = { status: 'error', response: e.message, logSummary: e.message, runToolCalls: [] };
   }
-
-  // Log to cron JSONL
-  await appendCronLog(entry.id, {
-    cronName: entry.name,
-    status: run.status,
-    response: run.response,
-    logSummary: run.logSummary,
-  }).catch(e => console.error(`[cron] log error: ${e.message}`));
 
   // once: true — delete after firing
   if (entry.once) {
