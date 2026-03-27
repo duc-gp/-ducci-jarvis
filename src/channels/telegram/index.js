@@ -11,6 +11,7 @@ import { run } from '@grammyjs/runner';
 import { handleChat, requestAbort } from '../../server/agent.js';
 import { loadSession } from '../../server/sessions.js';
 import { PATHS } from '../../server/config.js';
+import { isRunningCron, getRunningCrons } from '../../server/cron-scheduler.js';
 import { load, save } from './sessions.js';
 import { describeImage } from '../../server/vision.js';
 
@@ -123,6 +124,54 @@ function lookupContextWindow(model) {
   return null;
 }
 
+function nextCronDate(expression) {
+  try {
+    const parts = expression.trim().split(/\s+/);
+    if (parts.length !== 5) return null;
+    const [minE, hourE, domE, monE, dowE] = parts;
+
+    function matchField(expr, val) {
+      if (expr === '*') return true;
+      if (expr.includes(',')) return expr.split(',').some(p => matchField(p, val));
+      if (expr.includes('/')) {
+        const [range, step] = expr.split('/');
+        const s = parseInt(step, 10);
+        if (range === '*') return val % s === 0;
+        const [lo, hi] = range.split('-').map(Number);
+        return val >= lo && val <= hi && (val - lo) % s === 0;
+      }
+      if (expr.includes('-')) {
+        const [lo, hi] = expr.split('-').map(Number);
+        return val >= lo && val <= hi;
+      }
+      return parseInt(expr, 10) === val;
+    }
+
+    const candidate = new Date();
+    candidate.setSeconds(0, 0);
+    candidate.setMinutes(candidate.getMinutes() + 1);
+
+    for (let i = 0; i < 10080; i++) {
+      if (matchField(minE, candidate.getMinutes()) &&
+          matchField(hourE, candidate.getHours()) &&
+          matchField(domE, candidate.getDate()) &&
+          matchField(monE, candidate.getMonth() + 1) &&
+          matchField(dowE, candidate.getDay())) {
+        return candidate;
+      }
+      candidate.setMinutes(candidate.getMinutes() + 1);
+    }
+    return null;
+  } catch { return null; }
+}
+
+function formatMinutes(mins) {
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
 export async function startTelegramChannel(config) {
   const { token, allowedUserIds } = config.telegram;
 
@@ -198,6 +247,7 @@ export async function startTelegramChannel(config) {
     { command: 'context', description: 'Estimated context size vs model limit' },
     { command: 'stop',    description: 'Stop the running agent on the active slot' },
     { command: 'slots',   description: 'Show all slots and their status' },
+    { command: 'crons',   description: 'Show all crons, running status and next run' },
     { command: 'version', description: 'Show Jarvis version' },
     { command: 'update',  description: 'Update Jarvis to the latest version' },
     { command: 'restart', description: 'Restart Jarvis' },
@@ -470,6 +520,57 @@ export async function startTelegramChannel(config) {
 
   bot.callbackQuery('slots_noop', async (ctx) => {
     await ctx.answerCallbackQuery();
+  });
+
+  bot.command('crons', async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!allowedUserIds.includes(userId)) return;
+
+    let entries = [];
+    try {
+      entries = JSON.parse(fs.readFileSync(PATHS.cronsFile, 'utf8'));
+    } catch { /* no crons file */ }
+
+    if (entries.length === 0) {
+      await ctx.reply('Keine Crons konfiguriert.');
+      return;
+    }
+
+    const runningMap = getRunningCrons(); // id -> startDate
+    const now = Date.now();
+    const lines = ['<b>Crons:</b>'];
+
+    for (const entry of entries) {
+      const running = isRunningCron(entry.id);
+      let statusLine;
+
+      if (running) {
+        const startDate = runningMap.get(entry.id);
+        let elapsed = '';
+        if (startDate) {
+          const secs = Math.floor((now - startDate.getTime()) / 1000);
+          const m = Math.floor(secs / 60);
+          const s = secs % 60;
+          elapsed = m > 0 ? ` (seit ${m}m ${s}s)` : ` (seit ${s}s)`;
+        }
+        statusLine = `🟢 läuft${elapsed}`;
+      } else {
+        const nextDate = nextCronDate(entry.schedule);
+        if (nextDate) {
+          const diffMins = Math.round((nextDate.getTime() - now) / 60000);
+          statusLine = `⏰ in ${formatMinutes(diffMins)}`;
+        } else {
+          statusLine = `⏰ unbekannt`;
+        }
+      }
+
+      const onceMark = entry.once ? ' <i>(einmalig)</i>' : '';
+      lines.push(`\n<b>${escapeHtml(entry.name)}</b>${onceMark}`);
+      lines.push(`${statusLine}`);
+      lines.push(`<code>${escapeHtml(entry.schedule)}</code>`);
+    }
+
+    await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' });
   });
 
   // Runs one or more batches until the pending queue is drained.

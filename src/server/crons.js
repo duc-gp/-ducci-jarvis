@@ -22,6 +22,7 @@ async function appendCronLog(cronId, entry) {
 
 export async function runCron(entry, config) {
   console.log(`[cron] running "${entry.name}"`);
+  cronScheduler.setRunning(entry.id);
 
   const systemPromptTemplate = loadSystemPrompt();
   const session = createSession(systemPromptTemplate);
@@ -127,6 +128,8 @@ export async function runCron(entry, config) {
   } catch (e) {
     run = { status: 'error', response: e.message, logSummary: e.message, runToolCalls: [] };
   }
+
+  cronScheduler.clearRunning(entry.id);
 
   // once: true — delete after firing
   if (entry.once) {
