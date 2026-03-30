@@ -329,9 +329,9 @@ export async function startTelegramChannel(config) {
     }
 
     const totalMessages = Math.max(0, session.messages.length - 1); // exclude system prompt
-    const windowed = session.messages.length <= config.contextWindow + 1
+    const windowed = session.messages.length <= config.messageWindow + 1
       ? session.messages
-      : [session.messages[0], ...session.messages.slice(-config.contextWindow)];
+      : [session.messages[0], ...session.messages.slice(-config.messageWindow)];
     const inContext = Math.max(0, windowed.length - 1);
     const estimatedTokens = Math.round(JSON.stringify(windowed).length / 4);
     const model = config.selectedModel || 'unknown';

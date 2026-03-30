@@ -202,8 +202,8 @@ async function runSubagent(client, config, args, parentSessionId) {
       }
       return msg;
     });
-    if (resolved.length <= subConfig.contextWindow + 1) return resolved;
-    return [resolved[0], ...resolved.slice(-(subConfig.contextWindow))];
+    if (resolved.length <= subConfig.messageWindow + 1) return resolved;
+    return [resolved[0], ...resolved.slice(-(subConfig.messageWindow))];
   }
 
   const run = await runAgentLoop(client, subConfig, subSession, prepareMessages, usageAccum);
@@ -766,7 +766,7 @@ async function _runHandleChat(config, sessionId, userMessage, attachments = [], 
 
   // Resolves {{user_info}} in system prompt at runtime (never persisted).
   // Applies a sliding window: always includes the system prompt (messages[0])
-  // plus the most recent contextWindow messages, so long sessions don't overflow
+  // plus the most recent messageWindow messages, so long sessions don't overflow
   // the model's context. Full history is always preserved on disk.
   function prepareMessages(messages) {
     const resolved = messages.map((msg, i) => {
@@ -775,8 +775,8 @@ async function _runHandleChat(config, sessionId, userMessage, attachments = [], 
       }
       return msg;
     });
-    if (resolved.length <= config.contextWindow + 1) return resolved;
-    return [resolved[0], ...resolved.slice(-(config.contextWindow))];
+    if (resolved.length <= config.messageWindow + 1) return resolved;
+    return [resolved[0], ...resolved.slice(-(config.messageWindow))];
   }
 
   const allToolCalls = [];
