@@ -71,7 +71,7 @@ export function loadConfig() {
     fallbackModel: settings.fallbackModel || (provider === 'anthropic' ? 'claude-haiku-4-5-20251001' : 'openrouter/free'),
     maxIterations: settings.maxIterations || 20,
     maxHandoffs: settings.maxHandoffs || 3,
-    contextWindow: settings.contextWindow || 100,
+    contextWindow: settings.contextWindow || 300,
     modelContextWindow: settings.modelContextWindow || null,
     port: settings.port || 18008,
     telegram: {
