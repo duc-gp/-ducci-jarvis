@@ -6,7 +6,7 @@ const execAsync = promisify(exec);
 import { createRequire } from 'module';
 const _require = createRequire(import.meta.url);
 const { version: JARVIS_VERSION } = _require('../../../package.json');
-import { Bot, InlineKeyboard } from 'grammy';
+import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import { run } from '@grammyjs/runner';
 import { handleChat, requestAbort } from '../../server/agent.js';
 import { loadSession } from '../../server/sessions.js';
@@ -14,6 +14,7 @@ import { PATHS } from '../../server/config.js';
 import { isRunningCron, getRunningCrons } from '../../server/cron-scheduler.js';
 import { load, save } from './sessions.js';
 import { describeImage } from '../../server/vision.js';
+import { textToSpeech, speechToText, generateTtsSummary } from '../../server/fish-audio.js';
 
 function getTelegramChatLogPath(chatId, sessionId) {
   const prefix = sessionId ? String(sessionId).slice(0, 8) : 'unknown';
@@ -35,6 +36,16 @@ function stripHtml(text) {
   return text
     .replace(/<[^>]+>/g, '')
     .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+}
+
+// Strip HTML for passing plain text to the TTS summary LLM.
+function toPlainText(htmlText) {
+  let text = htmlText;
+  // Remove <pre> code blocks entirely — not useful spoken
+  text = text.replace(/<pre>[\s\S]*?<\/pre>/gi, '');
+  // Remove <code> inline tags but keep content
+  text = text.replace(/<code>([^<]*)<\/code>/gi, '$1');
+  return stripHtml(text).replace(/[ \t]+/g, ' ').trim();
 }
 
 function markdownToHtml(text) {
@@ -248,6 +259,7 @@ export async function startTelegramChannel(config) {
     { command: 'stop',    description: 'Stop the running agent on the active slot' },
     { command: 'slots',   description: 'Show all slots and their status' },
     { command: 'crons',   description: 'Show all crons, running status and next run' },
+    { command: 'voice',   description: 'Toggle voice responses on/off (fish.audio TTS)' },
     { command: 'version', description: 'Show Jarvis version' },
     { command: 'update',  description: 'Update Jarvis to the latest version' },
     { command: 'restart', description: 'Restart Jarvis' },
@@ -573,6 +585,28 @@ export async function startTelegramChannel(config) {
     await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' });
   });
 
+  bot.command('voice', async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!allowedUserIds.includes(userId)) return;
+
+    if (!config.fishAudioApiKey) {
+      await ctx.reply('fish.audio not configured. Add FISH_AUDIO_API_KEY to ~/.jarvis/.env first.');
+      return;
+    }
+
+    // Toggle voiceEnabled in settings.json and update live config
+    let settings = {};
+    try {
+      settings = JSON.parse(fs.readFileSync(PATHS.settingsFile, 'utf8'));
+    } catch { /* ignore */ }
+    settings.voiceEnabled = !config.voiceEnabled;
+    fs.writeFileSync(PATHS.settingsFile, JSON.stringify(settings, null, 2), 'utf8');
+    config.voiceEnabled = settings.voiceEnabled;
+
+    const status = config.voiceEnabled ? 'on' : 'off';
+    await ctx.reply(`Voice responses: <b>${status}</b>`, { parse_mode: 'HTML' });
+  });
+
   // Runs one or more batches until the pending queue is drained.
   // Each iteration takes all currently pending messages, merges them into a
   // single user turn, calls handleChat once, and sends one response.
@@ -662,6 +696,29 @@ export async function startTelegramChannel(config) {
           await appendTelegramChatLog(chatId, result.sessionId, 'JARVIS', displayText);
           await sendMessage(api, chatId, displayText, result.sessionId);
           console.log(`[telegram] response sent chat_id=${chatId} slot=${slot} length=${displayText.length}`);
+          // TTS: send audio summary if voice is enabled (config.voiceEnabled checked live, updated by /voice toggle)
+          if (config.voiceEnabled && config.fishAudioApiKey) {
+            try {
+              // If the response is a raw JSON blob (format_error recovery), extract the actual text
+              let ttsSource = displayText;
+              try {
+                const parsed = JSON.parse(displayText);
+                if (parsed?.response) ttsSource = parsed.response;
+              } catch { /* not JSON, use as-is */ }
+              const plain = toPlainText(ttsSource);
+              if (plain) {
+                const ttsText = await generateTtsSummary(plain, config);
+                if (ttsText) {
+                  const audioBuffer = await textToSpeech(ttsText, config);
+                  await api.sendAudio(chatId, new InputFile(audioBuffer, 'response.mp3'));
+                  console.log(`[telegram] voice sent chat_id=${chatId} slot=${slot} tts_chars=${ttsText.length}`);
+                }
+              }
+            } catch (e) {
+              console.error(`[telegram] TTS error chat_id=${chatId}: ${e.message}`);
+              await api.sendMessage(chatId, `[TTS error: ${e.message}]`).catch(() => {});
+            }
+          }
         } else {
           console.log(`[telegram] skipped duplicate final response chat_id=${chatId} slot=${slot}`);
         }
@@ -716,6 +773,70 @@ export async function startTelegramChannel(config) {
     isRunning.add(key);
     runStartTimes.set(key, new Date());
     await ctx.api.sendChatAction(chatId, 'typing');
+    const typingInterval = setInterval(() => {
+      ctx.api.sendChatAction(chatId, 'typing').catch(() => {});
+    }, 4000);
+
+    try {
+      await processQueue(ctx.api, chatId, slot, [entry]);
+    } finally {
+      clearInterval(typingInterval);
+      isRunning.delete(key);
+      runStartTimes.delete(key);
+    }
+  });
+
+  bot.on('message:voice', async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!allowedUserIds.includes(userId)) return;
+
+    const chatId = ctx.chat.id;
+    const ts = new Date().toISOString();
+
+    if (!config.fishAudioApiKey) {
+      await ctx.reply('Voice input not configured. Add FISH_AUDIO_API_KEY to ~/.jarvis/.env first.');
+      return;
+    }
+
+    console.log(`[telegram] incoming voice chat_id=${chatId}`);
+    await ctx.api.sendChatAction(chatId, 'typing');
+
+    // Download voice file (OGG/Opus from Telegram)
+    let transcription;
+    try {
+      const file = await ctx.api.getFile(ctx.message.voice.file_id);
+      const fileUrl = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
+      const audioResponse = await fetch(fileUrl);
+      const audioBuffer = Buffer.from(await audioResponse.arrayBuffer());
+      transcription = await speechToText(audioBuffer, config);
+    } catch (e) {
+      console.error(`[telegram] STT error chat_id=${chatId}: ${e.message}`);
+      await ctx.reply(`Voice transcription failed: ${e.message}`).catch(() => {});
+      return;
+    }
+
+    if (!transcription) {
+      await ctx.reply('Could not transcribe voice message (empty result).').catch(() => {});
+      return;
+    }
+
+    console.log(`[telegram] voice transcribed chat_id=${chatId}: "${transcription.slice(0, 80)}"`);
+    // Echo transcription back so user can confirm what was understood
+    await ctx.reply(`<i>🎤 ${escapeHtml(transcription)}</i>`, { parse_mode: 'HTML' }).catch(() => {});
+
+    const entry = { text: transcription, attachments: [], ts };
+    const slot = getActiveSlot(chatId);
+    const key = slotKey(chatId, slot);
+
+    if (isRunning.has(key)) {
+      if (!pendingMessages.has(key)) pendingMessages.set(key, []);
+      pendingMessages.get(key).push(entry);
+      console.log(`[telegram] buffered voice chat_id=${chatId} slot=${slot} pending=${pendingMessages.get(key).length}`);
+      return;
+    }
+
+    isRunning.add(key);
+    runStartTimes.set(key, new Date());
     const typingInterval = setInterval(() => {
       ctx.api.sendChatAction(chatId, 'typing').catch(() => {});
     }, 4000);

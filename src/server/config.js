@@ -64,6 +64,9 @@ export function loadConfig() {
     visionApiKey = process.env.OPENROUTER_API_KEY || null;
   }
 
+  // fish.audio voice (optional) — TTS for outgoing responses, STT for incoming voice messages
+  const fishAudioApiKey = process.env.FISH_AUDIO_API_KEY || null;
+
   return {
     provider,
     apiKey,
@@ -81,6 +84,9 @@ export function loadConfig() {
     visionProvider,
     visionModel,
     visionApiKey,
+    voiceEnabled: settings.voiceEnabled || false,
+    fishAudioApiKey,
+    fishAudioVoiceId: settings.fishAudioVoiceId || null,
   };
 }
 
