@@ -131,6 +131,18 @@ function extractApiError(err, model) {
   };
 }
 
+// Extract the most specific error description available.
+// Provider-specific APIs (e.g. z.ai) return a code + message in err.error;
+// the OpenAI SDK sets err.message to the body message but sometimes prepends
+// the HTTP status code, making it less readable. Prefer err.error.message + code.
+function describeApiError(err) {
+  const bodyMsg = err?.error?.message;
+  const bodyCode = err?.error?.code;
+  if (bodyMsg && bodyCode) return `${bodyMsg} (code: ${bodyCode})`;
+  if (bodyMsg) return bodyMsg;
+  return err?.message ?? String(err);
+}
+
 async function callModelWithFallback(client, config, messages, tools) {
   let primaryErr = null;
   try {
@@ -141,9 +153,21 @@ async function callModelWithFallback(client, config, messages, tools) {
   try {
     return await callModel(client, config.fallbackModel, messages, tools);
   } catch (fallbackErr) {
-    const combined = new Error(
-      `Both primary (${config.selectedModel}) and fallback (${config.fallbackModel}) models failed. Last error: ${fallbackErr.message}`
-    );
+    const primaryDesc = describeApiError(primaryErr);
+    const fallbackDesc = describeApiError(fallbackErr);
+    const sameModel = config.selectedModel === config.fallbackModel;
+    const sameError = primaryDesc === fallbackDesc;
+
+    let msg;
+    if (sameModel && sameError) {
+      msg = `Model (${config.selectedModel}) failed: ${fallbackDesc}`;
+    } else if (sameModel) {
+      msg = `Model (${config.selectedModel}) failed. Primary: ${primaryDesc} | Fallback: ${fallbackDesc}`;
+    } else {
+      msg = `Both primary (${config.selectedModel}) and fallback (${config.fallbackModel}) models failed. Primary: ${primaryDesc} | Fallback: ${fallbackDesc}`;
+    }
+
+    const combined = new Error(msg);
     combined.apiErrors = {
       primary: extractApiError(primaryErr, config.selectedModel),
       fallback: extractApiError(fallbackErr, config.fallbackModel),
@@ -375,7 +399,7 @@ export async function runAgentLoop(client, config, session, prepareMessages, usa
             if (toolName === 'spawn_subagent') {
               result = await runSubagent(client, config, toolArgs, config._sessionId);
             } else {
-              result = await executeTool(tools, toolName, toolArgs);
+              result = await executeTool(tools, toolName, toolArgs, { sendFile: config._sendFile ?? null });
             }
           } catch (e) {
             result = { status: 'error', error: e.message };
@@ -685,7 +709,7 @@ export async function withSessionLock(sessionId, fn) {
  * Main entry point: handles a single POST /api/chat request.
  * Manages the handoff loop across multiple agent runs.
  */
-export async function handleChat(config, requestSessionId, userMessage, attachments = [], onCheckpoint = null) {
+export async function handleChat(config, requestSessionId, userMessage, attachments = [], onCheckpoint = null, onSendFile = null) {
   const sessionId = requestSessionId || crypto.randomUUID();
 
   // Serialize concurrent requests for the same session. Each request registers
@@ -699,7 +723,7 @@ export async function handleChat(config, requestSessionId, userMessage, attachme
   await previous;
 
   try {
-    return await _runHandleChat(config, sessionId, userMessage, attachments, onCheckpoint);
+    return await _runHandleChat(config, sessionId, userMessage, attachments, onCheckpoint, onSendFile);
   } finally {
     releaseLock();
     // Clean up only if no one else has queued behind us
@@ -713,7 +737,7 @@ export async function handleChat(config, requestSessionId, userMessage, attachme
  * The actual chat logic, extracted so handleChat can wrap it cleanly with the
  * session lock.
  */
-async function _runHandleChat(config, sessionId, userMessage, attachments = [], onCheckpoint = null) {
+async function _runHandleChat(config, sessionId, userMessage, attachments = [], onCheckpoint = null, onSendFile = null) {
   const client = createClient(config);
 
   const systemPromptTemplate = loadSystemPrompt();
@@ -813,7 +837,7 @@ async function _runHandleChat(config, sessionId, userMessage, attachments = [], 
       }
 
       const runStartIndex = session.messages.length;
-      const run = await runAgentLoop(client, { ...config, _sessionId: sessionId }, session, prepareMessages, usageAccum);
+      const run = await runAgentLoop(client, { ...config, _sessionId: sessionId, _sendFile: onSendFile }, session, prepareMessages, usageAccum);
       allToolCalls.push(...run.runToolCalls);
 
       if (run.status !== 'checkpoint_reached') {

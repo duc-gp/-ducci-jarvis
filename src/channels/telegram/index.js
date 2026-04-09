@@ -658,6 +658,9 @@ export async function startTelegramChannel(config) {
           lastCheckpointSent = prefixed;
           await appendTelegramChatLog(chatId, getSessionId(chatId, slot) || null, 'JARVIS', prefixed);
           await sendMessage(api, chatId, prefixed, getSessionId(chatId, slot) || null);
+        }, async (filePath, caption) => {
+          await api.sendDocument(chatId, new InputFile(filePath), caption ? { caption } : {});
+          console.log(`[telegram] file sent chat_id=${chatId} slot=${slot} path=${filePath}`);
         });
       } catch (e) {
         console.error(`[telegram] agent error chat_id=${chatId} slot=${slot}: ${e.message}`);

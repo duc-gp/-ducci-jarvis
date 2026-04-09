@@ -379,6 +379,37 @@ const SEED_TOOLS = {
       };
     `,
   },
+  send_file: {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'send_file',
+        description: 'Send a file from disk to the user in the current chat (e.g. Telegram). Supports any file type: images, PDFs, text files, archives, etc. Use a caption to describe the file.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: {
+              type: 'string',
+              description: 'Absolute or ~ path to the file to send.',
+            },
+            caption: {
+              type: 'string',
+              description: 'Optional caption displayed with the file.',
+            },
+          },
+          required: ['path'],
+        },
+      },
+    },
+    code: `
+      const _p = args.path;
+      const targetPath = path.resolve(_p === '~' || _p.startsWith('~/') ? require('os').homedir() + _p.slice(1) : _p);
+      if (!fs.existsSync(targetPath)) return { status: 'error', error: 'File not found: ' + targetPath };
+      if (typeof sendFile !== 'function') return { status: 'error', error: 'send_file is not supported in this channel.' };
+      await sendFile(targetPath, args.caption || '');
+      return { status: 'ok', path: targetPath };
+    `,
+  },
   create_cron: {
     definition: {
       type: 'function',
@@ -793,13 +824,13 @@ export function getToolDefinitions(tools) {
   return defs;
 }
 
-export async function executeTool(tools, name, toolArgs) {
+export async function executeTool(tools, name, toolArgs, { sendFile = null } = {}) {
   const tool = tools[name];
   if (!tool) {
     throw new Error(`Unknown tool: ${name}`);
   }
 
-  const fn = new AsyncFunction('args', 'fs', 'path', 'process', 'require', '__jarvisDir', tool.code);
+  const fn = new AsyncFunction('args', 'fs', 'path', 'process', 'require', '__jarvisDir', 'sendFile', tool.code);
 
   // Tools can declare their own timeout (e.g. system_install needs 5 min).
   // Falls back to the global default of 60s.
@@ -812,5 +843,5 @@ export async function executeTool(tools, name, toolArgs) {
     )
   );
 
-  return await Promise.race([fn(toolArgs, fs, path, process, _require, __jarvisDir), timeout]);
+  return await Promise.race([fn(toolArgs, fs, path, process, _require, __jarvisDir, sendFile), timeout]);
 }
