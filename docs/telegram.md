@@ -248,7 +248,7 @@ await bot.api.setMyCommands([
 
 ## Photo Support
 
-The bot handles incoming photos (`message:photo`) in addition to text. When a user sends a photo, the adapter selects the best resolution under 800px wide to keep token usage reasonable, then passes the image URL and optional caption to the agent as a multimodal content block.
+The bot handles incoming photos (`message:photo`) in addition to text. When a user sends a photo, the adapter selects the best resolution under 800px wide to keep token usage reasonable.
 
 ### Photo selection
 
@@ -265,30 +265,65 @@ This gives the highest quality image below the 800px threshold. Sending the full
 
 The image is downloaded immediately at receive time using the Telegram file URL (`https://api.telegram.org/file/bot<token>/<file_path>`) and converted to a base64 data URL (`data:image/jpeg;base64,...`). The data URL is stored directly in the session message, so the image remains available across handoffs and future conversation turns without depending on a Telegram URL that would expire after ~1 hour. Base64 encoding does not cost more tokens than a URL — image token cost is based on pixel dimensions, not transport format.
 
-### Agent call
+### Image processing paths
 
-Photos are passed to the agent as a multimodal content array instead of a plain string:
+How the image reaches the model depends on whether a dedicated vision model is configured:
+
+**Path 1 — `visionModel` configured** (`settings.json: visionProvider + visionModel`):
+Before the main agent call, the adapter calls `describeImage()` — a separate, one-shot API call to the vision model. The result (a text description of the image) is injected into the user turn as plain text. The main agent never sees the image itself; it only sees the description. This allows a cheap non-multimodal main model to handle image conversations.
+
+**Path 2 — No `visionModel`, multimodal main model**:
+The base64 data URL is passed directly to the main model as an `image_url` content block alongside any caption. The model processes the image natively.
 
 ```js
 const content = [
-  { type: 'image_url', url: fileUrl },
+  { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,...' } },
+  { type: 'text', text: caption },
 ];
-if (caption) content.push({ type: 'text', text: caption });
 ```
 
-The agent layer must support receiving `content` as either a string or a content array and pass it through to the model accordingly.
+**Fallback — model rejects image input**:
+If the main model returns an error indicating it does not support image input (`isImageUnsupportedError`), the agent responds with a clear message ("This model does not support image input…") and strips the image from the session so subsequent messages are not permanently broken. A text placeholder is inserted in its place so the model retains context.
 
 ### Caption
 
-If the user attaches a caption to the photo (`ctx.message.caption`), it is included as a text block alongside the image. If there is no caption, only the image block is sent.
+If the user attaches a caption to the photo (`ctx.message.caption`), it is included alongside the image (as a text block in multimodal mode, or appended to the vision description in Path 1). If there is no caption, only the image content is sent.
 
-### Unsupported media types
+### Unsupported incoming media types
 
-Documents, audio, video, stickers, and other non-photo media types are not handled — the bot silently ignores them (same as unauthorized messages).
+Documents, audio files, video, stickers, and other non-photo non-voice media types sent by the user are not handled — the bot silently ignores them.
+
+## Outgoing Files
+
+The agent can send files from the server to the Telegram chat using the `send_file` seed tool. This complements the text-only `send_telegram_message` tool for cases where the agent has produced or located a file the user needs.
+
+### Tool interface
+
+```js
+send_file({ path: '/absolute/or/~/path/to/file', caption: 'Optional caption' })
+```
+
+The tool resolves `~` to the home directory, checks that the file exists, and calls the channel-provided `sendFile` callback. It returns `{ status: 'error', error: '...' }` if the file is not found or the channel does not support file sending.
+
+### Channel integration
+
+The Telegram adapter passes an `onSendFile` callback to `handleChat`:
+
+```js
+handleChat(config, sessionId, userText, attachments, onCheckpoint, async (filePath, caption) => {
+  await api.sendDocument(chatId, new InputFile(filePath), caption ? { caption } : {});
+});
+```
+
+`InputFile(filePath)` streams the file from disk — no in-memory buffering of the full file. The callback is threaded through `handleChat → _runHandleChat → runAgentLoop → executeTool` and injected into the tool's `AsyncFunction` as the `sendFile` parameter.
+
+### Channel support
+
+`send_file` only works in channels that register an `onSendFile` callback (currently: Telegram). In other contexts (web UI, cron runs), the tool returns an error immediately rather than silently succeeding.
 
 ## Non-Goals (v1)
 
-- No support for documents, audio, video, or other non-photo media types
+- No support for receiving documents, audio files, video, or other non-photo non-voice media from the user
 - No inline keyboards or callback queries
 - No group chat support (only private chats)
 - No message editing or deletion handling
