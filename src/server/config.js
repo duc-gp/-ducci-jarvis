@@ -23,6 +23,7 @@ export const PATHS = {
   identityFile: path.join(JARVIS_DIR, 'data', 'identity.md'),
   skillsDir: path.join(JARVIS_DIR, 'data', 'skills'),
   cronsFile: path.join(JARVIS_DIR, 'data', 'crons.json'),
+  uploadsDir: path.join(JARVIS_DIR, 'uploads'),
   systemPromptFile: path.join(__dirname, '..', '..', 'docs', 'system-prompt.md'),
 };
 

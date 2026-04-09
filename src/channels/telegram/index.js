@@ -853,6 +853,83 @@ export async function startTelegramChannel(config) {
     }
   });
 
+  bot.on('message:document', async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!allowedUserIds.includes(userId)) return;
+
+    const chatId = ctx.chat.id;
+    const ts = new Date().toISOString();
+    const doc = ctx.message.document;
+
+    const MAX_BYTES = 20 * 1024 * 1024; // 20MB — Telegram bot API getFile limit
+    if (doc.file_size && doc.file_size > MAX_BYTES) {
+      await ctx.reply(`File too large (${Math.round(doc.file_size / 1024 / 1024)}MB). Telegram bot API limit is 20MB.`).catch(() => {});
+      return;
+    }
+
+    console.log(`[telegram] incoming document chat_id=${chatId} name=${doc.file_name} size=${doc.file_size}`);
+
+    let savedPath;
+    try {
+      const file = await ctx.api.getFile(doc.file_id);
+      const fileUrl = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
+      const response = await fetch(fileUrl);
+      const buffer = Buffer.from(await response.arrayBuffer());
+
+      fs.mkdirSync(PATHS.uploadsDir, { recursive: true });
+      const safeName = (doc.file_name || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
+      savedPath = path.join(PATHS.uploadsDir, `${Date.now()}-${safeName}`);
+      fs.writeFileSync(savedPath, buffer);
+    } catch (e) {
+      console.error(`[telegram] document download error chat_id=${chatId}: ${e.message}`);
+      await ctx.reply('Sorry, could not download the file.').catch(() => {});
+      return;
+    }
+
+    const sizeKb = doc.file_size ? `${Math.round(doc.file_size / 1024)} KB` : 'unknown size';
+    const mimeType = doc.mime_type || 'application/octet-stream';
+    const fileInfo = `[User sent a file: ${savedPath} (${mimeType}, ${sizeKb})]`;
+    const userText = ctx.message.caption ? `${fileInfo}\n${ctx.message.caption}` : fileInfo;
+
+    const entry = { text: userText, attachments: [], ts };
+    const slot = getActiveSlot(chatId);
+    const key = slotKey(chatId, slot);
+
+    if (isRunning.has(key)) {
+      if (!pendingMessages.has(key)) pendingMessages.set(key, []);
+      pendingMessages.get(key).push(entry);
+      console.log(`[telegram] buffered document chat_id=${chatId} slot=${slot} pending=${pendingMessages.get(key).length}`);
+      return;
+    }
+
+    isRunning.add(key);
+    runStartTimes.set(key, new Date());
+    await ctx.api.sendChatAction(chatId, 'typing');
+    const typingInterval = setInterval(() => {
+      ctx.api.sendChatAction(chatId, 'typing').catch(() => {});
+    }, 4000);
+
+    try {
+      await processQueue(ctx.api, chatId, slot, [entry]);
+    } finally {
+      clearInterval(typingInterval);
+      isRunning.delete(key);
+      runStartTimes.delete(key);
+    }
+  });
+
+  bot.on('message:audio', async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!allowedUserIds.includes(userId)) return;
+    await ctx.reply("I can't process audio files. Send a voice message for speech input, or send the file using \"Send as file\" if you want me to read it.").catch(() => {});
+  });
+
+  bot.on('message:video', async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!allowedUserIds.includes(userId)) return;
+    await ctx.reply("I can't process video files. Use \"Send as file\" if you want me to access the file.").catch(() => {});
+  });
+
   bot.on('message:text', async (ctx) => {
     const userId = ctx.from?.id;
 
