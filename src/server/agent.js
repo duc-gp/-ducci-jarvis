@@ -782,6 +782,7 @@ async function _runHandleChat(config, sessionId, userMessage, attachments = [], 
   } else {
     userContent = userMessageWithContext;
   }
+  const interactionStartIndex = session.messages.length;
   session.messages.push({ role: 'user', content: userContent });
   session.metadata.handoffCount = 0;
   session.metadata.failedApproaches = [];
@@ -820,7 +821,7 @@ async function _runHandleChat(config, sessionId, userMessage, attachments = [], 
       // Safety check: if the last two assistant messages are both model_error
       // synthetic notes, we are in a confirmed failure loop. Escalate immediately
       // rather than burning more iterations on a stuck session.
-      if (hasConsecutiveModelErrors(session.messages)) {
+      if (hasConsecutiveModelErrors(session.messages.slice(interactionStartIndex))) {
         finalResponse = 'The model has failed twice in a row. This is likely due to the conversation being too long for the model to process. Please start a new session or switch to a model with a larger context window.';
         finalLogSummary = 'Consecutive model_error detected: session escalated to intervention_required without running another agent loop.';
         finalStatus = 'intervention_required';
