@@ -1,6 +1,6 @@
 {
   "name": "@ducci/jarvis",
-  "version": "1.0.97",
+  "version": "1.0.98",
   "description": "A fully automated agent system that lives on a server.",
   "main": "./src/index.js",
   "type": "module",

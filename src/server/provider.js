@@ -155,6 +155,12 @@ export function createClient(config) {
       apiKey: config.apiKey,
     });
   }
+  if (config.provider === 'openai-compatible') {
+    return new OpenAI({
+      baseURL: config.baseURL,
+      apiKey: config.apiKey,
+    });
+  }
   // Default: OpenRouter (OpenAI-compatible)
   return new OpenAI({
     baseURL: 'https://openrouter.ai/api/v1',

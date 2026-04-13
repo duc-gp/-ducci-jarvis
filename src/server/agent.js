@@ -150,6 +150,9 @@ async function callModelWithFallback(client, config, messages, tools) {
   } catch (err) {
     primaryErr = err;
   }
+  if (!config.fallbackModel) {
+    throw primaryErr;
+  }
   try {
     return await callModel(client, config.fallbackModel, messages, tools);
   } catch (fallbackErr) {
@@ -536,8 +539,9 @@ export async function runAgentLoop(client, config, session, prepareMessages, usa
       try {
         parsed = JSON.parse(sanitizeJson(content));
       } catch {
-        // Step 1: retry with fallback model
+        // Step 1: retry with fallback model (if configured)
         try {
+          if (!config.fallbackModel) throw new Error('no fallback model configured');
           const fallbackResult = await callModel(client, config.fallbackModel, preparedMessages, toolDefs);
           accumulateUsage(usageAccum, fallbackResult);
           const fallbackContent = fallbackResult.choices[0]?.message?.content || '';

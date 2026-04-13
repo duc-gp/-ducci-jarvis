@@ -121,6 +121,7 @@ async function run() {
         { name: 'OpenRouter (access many models via one key)', value: 'openrouter' },
         { name: 'Anthropic Direct (use your Anthropic API key)', value: 'anthropic' },
         { name: 'Z.AI Direct (GLM models, use your Z.AI API key)', value: 'z-ai' },
+        { name: 'OpenAI-compatible (any provider with an OpenAI-compatible API)', value: 'openai-compatible' },
       ],
       default: settings.provider || 'openrouter',
     }
@@ -187,6 +188,46 @@ async function run() {
       saveEnvVar('ZAI_API_KEY', apiKey);
       console.log(chalk.green('Z.AI API key saved.'));
     }
+  } else if (provider === 'openai-compatible') {
+    const { baseURL } = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'baseURL',
+        message: 'Enter the base URL of the OpenAI-compatible API (e.g., https://api.example.com/v1):',
+        default: settings.customBaseURL || '',
+        validate: (input) => input.trim().length > 0 || 'Base URL cannot be empty.',
+      }
+    ]);
+    settings.customBaseURL = baseURL.trim();
+
+    const existingKey = loadEnvVar('CUSTOM_API_KEY');
+    apiKey = existingKey;
+
+    if (existingKey) {
+      const { keepKey } = await inquirer.prompt([
+        {
+          type: 'confirm',
+          name: 'keepKey',
+          message: 'A CUSTOM_API_KEY is already configured. Do you want to keep it?',
+          default: true,
+        }
+      ]);
+      if (!keepKey) apiKey = null;
+    }
+
+    if (!apiKey) {
+      const { newKey } = await inquirer.prompt([
+        {
+          type: 'password',
+          name: 'newKey',
+          message: 'Enter your API key:',
+          validate: (input) => input.length >= 1 || 'API key cannot be empty.',
+        }
+      ]);
+      apiKey = newKey;
+      saveEnvVar('CUSTOM_API_KEY', apiKey);
+      console.log(chalk.green('API key saved.'));
+    }
   } else {
     const existingKey = loadEnvVar('OPENROUTER_API_KEY');
     apiKey = existingKey;
@@ -238,7 +279,17 @@ async function run() {
   }
 
   if (!selectedModel) {
-    if (provider === 'z-ai') {
+    if (provider === 'openai-compatible') {
+      const { manualModel } = await inquirer.prompt([
+        {
+          type: 'input',
+          name: 'manualModel',
+          message: 'Enter model ID (e.g., gpt-4o, mistral-large):',
+          validate: (input) => input.trim().length > 0 || 'Model ID cannot be empty.',
+        }
+      ]);
+      selectedModel = manualModel.trim();
+    } else if (provider === 'z-ai') {
       const models = await fetchZaiModels(apiKey);
       let choices;
       if (models.length > 0) {
@@ -374,7 +425,36 @@ async function run() {
   if (!settings.fallbackModel || previousProvider !== provider) {
     if (provider === 'anthropic') settings.fallbackModel = 'claude-haiku-4-5-20251001';
     else if (provider === 'z-ai') settings.fallbackModel = 'glm-4-flash';
+    else if (provider === 'openai-compatible') settings.fallbackModel = null;
     else settings.fallbackModel = 'openrouter/free';
+  }
+
+  if (provider === 'openai-compatible') {
+    const currentFallback = settings.fallbackModel;
+    if (currentFallback) {
+      const { keepFallback } = await inquirer.prompt([
+        {
+          type: 'list',
+          name: 'keepFallback',
+          message: `Current fallback model is ${chalk.yellow(currentFallback)}. Keep it or change it?`,
+          choices: [
+            { name: 'Keep current fallback model', value: true },
+            { name: 'Change fallback model', value: false },
+          ],
+        }
+      ]);
+      if (!keepFallback) settings.fallbackModel = null;
+    }
+    if (!settings.fallbackModel) {
+      const { fallbackModel } = await inquirer.prompt([
+        {
+          type: 'input',
+          name: 'fallbackModel',
+          message: 'Enter fallback model ID (leave empty to skip):',
+        }
+      ]);
+      settings.fallbackModel = fallbackModel.trim() || null;
+    }
   }
   if (settings.maxIterations === undefined) {
     settings.maxIterations = 20;

@@ -50,6 +50,10 @@ export function loadConfig() {
   } else if (provider === 'z-ai') {
     apiKey = process.env.ZAI_API_KEY;
     if (!apiKey) throw new Error('ZAI_API_KEY not found. Add it to ~/.jarvis/.env first.');
+  } else if (provider === 'openai-compatible') {
+    apiKey = process.env.CUSTOM_API_KEY;
+    if (!apiKey) throw new Error('CUSTOM_API_KEY not found. Run `jarvis setup` first.');
+    if (!settings.customBaseURL) throw new Error('customBaseURL not set in settings.json. Run `jarvis setup` first.');
   } else {
     apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) throw new Error('OPENROUTER_API_KEY not found. Run `jarvis setup` first.');
@@ -71,8 +75,9 @@ export function loadConfig() {
   return {
     provider,
     apiKey,
+    baseURL: settings.customBaseURL || null,
     selectedModel: settings.selectedModel,
-    fallbackModel: settings.fallbackModel || (provider === 'anthropic' ? 'claude-haiku-4-5-20251001' : 'openrouter/free'),
+    fallbackModel: settings.fallbackModel || (provider === 'anthropic' ? 'claude-haiku-4-5-20251001' : provider === 'openai-compatible' ? null : 'openrouter/free'),
     maxIterations: settings.maxIterations || 20,
     maxHandoffs: settings.maxHandoffs || 3,
     messageWindow: settings.messageWindow || 300,
