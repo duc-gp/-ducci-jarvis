@@ -231,7 +231,11 @@ async function runSubagent(client, config, args, parentSessionId) {
       return msg;
     });
     if (resolved.length <= subConfig.messageWindow + 1) return resolved;
-    return [resolved[0], ...resolved.slice(-(subConfig.messageWindow))];
+    // Walk back from the window boundary past any orphaned tool results to avoid
+    // starting mid-tool-call-sequence (MiniMax error 2013: tool_call_id not found)
+    let startIdx = resolved.length - subConfig.messageWindow;
+    while (startIdx > 1 && resolved[startIdx].role === 'tool') startIdx--;
+    return [resolved[0], ...resolved.slice(startIdx)];
   }
 
   const run = await runAgentLoop(client, subConfig, subSession, prepareMessages, usageAccum);
@@ -806,7 +810,11 @@ async function _runHandleChat(config, sessionId, userMessage, attachments = [], 
       return msg;
     });
     if (resolved.length <= config.messageWindow + 1) return resolved;
-    return [resolved[0], ...resolved.slice(-(config.messageWindow))];
+    // Walk back from the window boundary past any orphaned tool results to avoid
+    // starting mid-tool-call-sequence (MiniMax error 2013: tool_call_id not found)
+    let startIdx = resolved.length - config.messageWindow;
+    while (startIdx > 1 && resolved[startIdx].role === 'tool') startIdx--;
+    return [resolved[0], ...resolved.slice(startIdx)];
   }
 
   const allToolCalls = [];
