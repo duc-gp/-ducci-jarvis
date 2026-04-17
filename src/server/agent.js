@@ -22,7 +22,8 @@ function stripCodeFence(text) {
 //    JSON string values — models sometimes forget to escape \n as \\n
 // 3. Remove trailing commas before } and ] (JS-valid but JSON-invalid)
 function sanitizeJson(text) {
-  let s = stripCodeFence(text);
+  // Strip <think>...</think> blocks (e.g. MiniMax reasoning traces) before JSON parsing
+  let s = stripCodeFence(text).replace(/<think>[\s\S]*?<\/think>/g, '').trim();
 
   // State machine: walk the string and fix unescaped control chars inside strings
   let result = '';
